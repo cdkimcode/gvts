@@ -474,11 +474,930 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 
 	/* ensure we never gain time by being placed backwards. */
 	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
+#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+	cfs_rq->real_min_vruntime = vruntime;
+#endif
 #ifndef CONFIG_64BIT
 	smp_wmb();
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+	cfs_rq->real_min_vruntime_copy = vruntime;
+#endif
 #endif
 }
+
+#ifdef CONFIG_GPFS
+#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+static u64 real_min_vruntime(struct cfs_rq *cfs_rq) {
+	return cfs_rq->real_min_vruntime;
+}
+#else
+static inline u64 real_min_vruntime(struct cfs_rq *cfs_rq) {
+	return cfs_rq->min_vruntime;
+}
+#endif
+
+static inline unsigned long cfs_rq_lagged_weight_sum(struct cfs_rq *cfs_rq) {
+	/* The effective weight is actually the distribution of the weight
+	 * of the first level sched_entity. Thus, after calling update_cfs_shares(),
+	 * the sum of effective weight of tasks in a cpu which belongs to a certain group
+	 * is same with the load of the first level sched_entity.
+	 * Also, for the tasks of the root task group, the effective weight
+	 * is same with its weight.
+	 * Thus, sum of effective weight of all tasks in a cpu is same with
+	 * the sum of weight in cfs_rq of the cpu. */
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	if (unlikely(cfs_rq->target_vruntime == 0))
+		return rq_of(cfs_rq)->cfs.lagged_weight;
+#endif
+	return cfs_rq->lagged_weight;
+}
+
+/* Note that assume cfs_rq == &rq_of(cfs_rq)->cfs */
+static inline u64 __cfs_rq_target_vruntime(struct cfs_rq *cfs_rq) {
+	return rq_of(cfs_rq)->cfs.target_vruntime;
+}
+
+static inline u64 cfs_rq_target_vruntime(struct cfs_rq *cfs_rq) {
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	if (unlikely(cfs_rq->target_vruntime == 0))
+		return __cfs_rq_target_vruntime(cfs_rq);
+#endif
+	return cfs_rq->target_vruntime;
+}
+
+#ifdef CONFIG_GPFS_AMP
+static inline s64 task_lagged_type(struct sched_entity *se, u64 target, int type) {
+	return (target - se->vruntime) * se->__lagged_weight[type];
+}
+#endif /* CONFIG_GPFS_AMP */
+static inline s64 task_lagged(struct sched_entity *se, u64 target) {
+#if defined(CONFIG_GPFS_CONSIDER_UTIL) || defined(CONFIG_GPFS_AMP)
+	return (target - se->vruntime) * se->lagged_weight;
+#else
+	return (target - se->vruntime) * se->eff_load.weight;
+#endif
+}
+
+static inline s64 cfs_rq_lagged(struct cfs_rq *cfs_rq, u64 target) {
+	return cfs_rq->lagged + ((s64)target - (s64)cfs_rq_target_vruntime(cfs_rq)) 
+									* cfs_rq_lagged_weight_sum(cfs_rq);
+}
+
+static inline s64 rq_lagged(struct rq *rq, u64 target) {
+	return cfs_rq_lagged(&rq->cfs, target);
+}
+
+static inline s64 cpu_lagged(int cpu, u64 target) {
+	return rq_lagged(cpu_rq(cpu), target);
+}
+
+#ifdef CONFIG_GPFS_AMP
+#define DEBUG_SE_EFFI
+#ifdef CONFIG_FAIR_GROUP_SCHED
+/* se->effi == NULL */
+static unsigned long __se_effi(struct sched_entity *se, int type) {
+	struct sched_entity *curr = se;
+#ifdef DEBUG_SE_EFFI
+	if (unlikely(entity_is_task(se))) {
+		printk(KERN_ERR "%s: ERROR task->se->effi == NULL pid: %d comm: %s\n",
+					__func__, task_of(se)->pid, task_of(se)->comm);
+		panic("panic");
+	}
+#endif
+
+	while (curr && !curr->effi) {
+		printk(KERN_ERR "%s: se->effi == NULL ??  group_id: %d\n", 
+					__func__, cfs_rq_of(curr)->tg->css.id);
+		curr = curr->my_q->curr;
+	}
+
+#ifdef DEBUG_SE_EFFI
+	if (unlikely(!curr)) {
+		//printk(KERN_ERR "%s: ERROR lost way\n", __func__);
+		//return NICE_0_LOAD;
+		/* curr = se;
+		while (curr) {
+			printk(KERN_ERR "%s: ERROR group_id: %d\n", 
+					__func__, cfs_rq_of(curr)->tg->css.id);
+			curr = curr->my_q->curr;
+		} */
+		panic("%s: ERROR lost way", __func__);
+	}
+#endif
+
+	for (; curr != se; curr = curr->parent)
+		curr->parent->effi = curr->effi;
+panic("%s: dive into here...\n", __func__);
+	return se->effi[type];
+}
+
+static inline unsigned long se_effi(struct sched_entity *se, int type) {
+	if (likely(se->effi))
+		return se->effi[type];
+	return __se_effi(se, type);
+}
+
+static inline void set_curr_effi(struct task_struct *p) {
+	struct sched_entity *se = &p->se;
+	struct sched_entity *parent = se->parent;
+#ifdef DEBUG_SE_EFFI
+	if (unlikely(!se->effi))
+		panic("%s: se->effi == NULL\n", __func__);
+	//printk(KERN_ERR "%s: pid: %d comm: %s\n", __func__, p->pid, p->comm);
+#endif
+	for_each_sched_entity(parent) 
+		parent->effi = se->effi;
+}
+static inline void put_prev_effi(struct task_struct *p) {
+	struct sched_entity *se = &p->se;
+	struct sched_entity *parent = se->parent;
+#ifdef DEBUG_SE_EFFI
+	if (unlikely(!se->effi))
+		panic("%s: se->effi == NULL\n", __func__);
+	//printk(KERN_ERR "%s: pid: %d comm: %s\n", __func__, p->pid, p->comm);
+#endif
+	for_each_sched_entity(parent) 
+		parent->effi = NULL;
+}
+#else /* !CONFIG_FAIR_GROUP_SCHED */
+static inline unsigned long se_effi(struct sched_entity *se, int type) {
+	if (unlikely(!se->effi))
+		panic("%s: ERROR task->se->effi == NULL pid: %d comm: %d\n",
+					__func__, task_of(se)->pid, task_of(se)->comm);
+	return se->effi[type];
+}
+#define set_curr_effi(p) do{}while(0)
+#define put_prev_effi(p) do{}while(0)
+#endif /* !CONFIG_FAIR_GROUP_SCHED */
+#endif /* CONFIG_GPFS_AMP */
+
+#define DEBUG_LAGGED 0
+#if DEBUG_LAGGED > 0
+static void
+__debug_gather(int id, struct rq *rq, struct task_struct *p, unsigned long old, unsigned long new, int mode, int error) {
+#define NUM_DEBUG_DATA 40
+	static DEFINE_SPINLOCK(debugging);
+	static struct {
+		atomic_t id; /* 0: invalid / 1: update_rq_lagged_weight / 2: update_eff_load */
+		unsigned long jiffies;
+		int cpu;
+		unsigned long nr_running;
+		int pid;
+		char comm[20];
+		unsigned long task_weight;
+		unsigned long rq_weight;
+		unsigned long old;
+		unsigned long new;
+		int mode;
+	} data[NUM_DEBUG_DATA];
+	static atomic64_t idx_global = {-1};
+	int idx, i, end;
+#ifdef CONFIG_LOCKDEP
+	int release_lock = 0;
+#endif
+
+	i = atomic64_inc_return(&idx_global);
+	idx = i % NUM_DEBUG_DATA;
+
+	BUG_ON(id == 0);
+	data[idx].jiffies = jiffies;
+	data[idx].cpu = rq->cpu;
+	data[idx].nr_running = rq->cfs.h_nr_running;
+	data[idx].pid = p->pid;
+	for (i = 0; i < 20 && p->comm[i] != '\0'; i++)
+		data[idx].comm[i] = p->comm[i];
+	if (i < 20) data[idx].comm[i] = '\0';
+	data[idx].task_weight = p->se.eff_load.weight;
+	data[idx].rq_weight = rq->cfs.lagged_weight;
+	data[idx].old = old;
+	data[idx].new = new;
+	data[idx].mode = mode;
+	mb();
+	atomic_set(&data[idx].id, id);
+
+
+	if (!error)
+		return;
+
+	preempt_disable();
+#ifdef CONFIG_LOCKDEP
+	if (lock_is_held(&rq->lock.dep_map)) {
+		release_lock = 1;
+		raw_spin_unlock(&rq->lock);
+	}
+#endif
+	spin_lock(&debugging);
+	i = (idx + 1) % NUM_DEBUG_DATA;
+	end = i; /* the next element of the end element */
+	/* note that at least one item is valid. */
+	while (atomic_read(&data[i].id) == 0)
+		i = (i + 1) % NUM_DEBUG_DATA;
+	
+	do {
+		id = atomic_xchg(&data[i].id, 0);
+		if (id == 0)
+			break;
+		printk(KERN_ERR "DEBUG %16ld [%s] cpu: %2d nr: %2ld pid: %5d comm: %20s"
+				 		" se.weight: %5ld rq.weight: %9ld old: %6ld new: %6ld %s: %d\n",
+						data[i].jiffies,
+						id == 1 ? "rq_eff__" :
+						id == 2 ? "task_eff" :
+										  "invalid_",
+						data[i].cpu,
+						data[i].nr_running,
+						data[i].pid,
+						data[i].comm,
+						data[i].task_weight,
+						data[i].rq_weight,
+						data[i].old,
+						data[i].new,
+						id == 1 ? "mode" :
+						id == 2 ? "onrq" :
+										  "err_",
+						data[i].mode);
+		i = (i + 1) % NUM_DEBUG_DATA;
+	} while (i != end);
+	panic("Bug in lagged_weight");
+	spin_unlock(&debugging);
+#ifdef CONFIG_LOCKDEP
+	if (release_lock)
+		raw_spin_lock(&rq->lock);
+#endif
+	preempt_enable();
+#undef NUM_DEBUG_DATA
+}
+
+static void
+__debug_update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target, int mode) {
+	/* for @mode, 0: update target_vruntime_cache() without rq->lock
+	 *            1: update_target_vruntime_cache() with rq->lock
+	 *            2: update_lagged_enqueue() with rq->lock
+	 *            3: update_lagged_dequeue() with rq->lock]
+	 */
+	struct rq *rq = rq_of(cfs_rq);
+	struct task_struct *p, *n;
+	struct sched_entity *se;
+	unsigned long flags;
+	s64 lagged, lagged_one, lagged_add, lagged_sum, lagged_correct;
+	unsigned long lagged_weight_sum = 0, eff_weight_sum = 0;
+	int print = 0;
+	int correct_weight = 1, correct_weight_real = 1, correct_lagged_one = 1, correct_lagged_sum = 1;
+	static atomic64_t num_called = {0}, num_correct = {0};
+	static atomic64_t num_wrong_weight = {0}, num_wrong_weight_real = {0};
+	static atomic64_t num_wrong_lagged_one = {0}, num_wrong_lagged_sum = {0};
+	static unsigned long __num_called, __num_correct, __num_wrong_weight, __num_wrong_weight_real, __num_wrong_lagged_one, __num_wrong_lagged_sum;
+	struct {
+		s64 lagged;
+		s64 lagged_saved;
+		u64 lagged_target;
+		u64 vruntime;
+		unsigned long weight;
+	} tsk_info[cfs_rq->h_nr_running];
+	int num_task = 0, i;
+#ifdef CONFIG_GPFS_AMP
+	int type = rq->cpu_type;
+#endif
+
+	preempt_disable();
+
+	if (mode == 0) raw_spin_lock_irqsave(&rq->lock, flags);
+	lagged_add = (target - cfs_rq->target_vruntime) * cfs_rq_lagged_weight_sum(cfs_rq);
+	lagged_one = cfs_rq->lagged + lagged_add;
+	lagged_sum = 0;
+	lagged_correct = 0;
+
+	list_for_each_entry_safe(p, n, &rq->cfs_tasks, se.group_node) {
+		se = &p->se;
+		lagged_correct += task_lagged(se, target);
+#ifdef CONFIG_GPFS_CONSIDER_UTIL
+		lagged = (se->lagged_target - se->vruntime) * se->lagged_weight;
+#else
+		lagged = (se->lagged_target - se->vruntime) * se->eff_load.weight;
+#endif
+		if (se->lagged_target != target)
+			lagged += (target - se->lagged_target) * se->lagged_weight;
+		lagged_sum += lagged;
+
+		lagged_weight_sum += se->lagged_weight;
+		eff_weight_sum += se->eff_load.weight;
+
+		tsk_info[num_task].lagged = lagged;
+		tsk_info[num_task].lagged_saved = se->lagged;
+		tsk_info[num_task].lagged_target = se->lagged_target;
+		tsk_info[num_task].vruntime = se->vruntime;
+		tsk_info[num_task].weight = se->lagged_weight;
+		num_task++;
+	}
+
+	if (lagged_weight_sum != cfs_rq_lagged_weight_sum(cfs_rq))
+		correct_weight_real = 0;
+		
+	if (eff_weight_sum != cfs_rq_lagged_weight_sum(cfs_rq))
+		correct_weight = 0;
+	
+	if (lagged_one != lagged_sum)
+		correct_lagged_one = 0;
+
+	if (lagged_sum != lagged_correct)
+		correct_lagged_sum = 0;
+
+	if (mode == 0) raw_spin_unlock_irqrestore(&rq->lock, flags);
+
+	__num_called = atomic64_inc_return(&num_called);
+	if (correct_weight && correct_weight_real && correct_lagged_one && correct_lagged_sum) {
+		__num_correct = atomic64_inc_return(&num_correct);
+		goto out;
+	} else
+		__num_correct = atomic64_read(&num_correct);
+	
+	if (!correct_weight) 
+		__num_wrong_weight = atomic64_inc_return(&num_wrong_weight);
+	else
+		__num_wrong_weight = atomic64_read(&num_wrong_weight);
+	if (!correct_weight_real) 
+		__num_wrong_weight_real = atomic64_inc_return(&num_wrong_weight_real);
+	else
+		__num_wrong_weight_real = atomic64_read(&num_wrong_weight_real);
+	if (!correct_lagged_one)
+		__num_wrong_lagged_one = atomic64_inc_return(&num_wrong_lagged_one);
+	else
+		__num_wrong_lagged_one = atomic64_read(&num_wrong_lagged_one);
+	if (!correct_lagged_sum) 
+		__num_wrong_lagged_sum = atomic64_inc_return(&num_wrong_lagged_sum);
+	else
+		__num_wrong_lagged_sum = atomic64_read(&num_wrong_lagged_sum);
+		
+	if ((!correct_weight && (__num_wrong_weight < 20 || __num_wrong_weight % 500 == 0))
+			|| (!correct_weight_real && (__num_wrong_weight_real < 20 || __num_wrong_weight_real % 500 == 0))) {
+		printk(KERN_ERR "[%s] cpu: %d nr_running: %d rq->weight: %ld eff_weight_sum: %ld lagged_weight_sum: %ld\n",
+			"DEBUG_TVR$", cpu_of(rq), cfs_rq->h_nr_running, cfs_rq_lagged_weight_sum(cfs_rq), eff_weight_sum, lagged_weight_sum);
+		print = 1;
+	}
+
+	if ((!correct_lagged_one && (__num_wrong_lagged_one < 20 || __num_wrong_lagged_one % 500 == 0)) 
+			|| (!correct_lagged_sum && (__num_wrong_lagged_sum < 20 || __num_wrong_lagged_sum % 500 == 0))){
+		printk(KERN_ERR "[%s] cpu: %d nr_running: %d rq->lagged: %lld added: %lld "
+						"lagged_one: %lld lagged_sum: %lld lagged_correct: %lld\n",
+						"DEBUG_TVR$", cpu_of(rq), cfs_rq->h_nr_running, cfs_rq->lagged, lagged_add,
+						lagged_one, lagged_sum, lagged_correct);
+		print = 1;
+	}
+
+out:
+	if (print == 1 || (__num_called > 0 && __num_called % 1000 == 0))
+		printk(KERN_ERR "[%s] (%s) cpu: %d num_called: %ld correct: %ld wrong: weight: %ld weight_real: %ld lagged_one: %ld lagged_sum: %ld\n",
+				"DEBUG_TVR$",
+				mode == 0 ? "$_U" :
+				mode == 1 ? "$_L" :
+				mode == 2 ? "enQ" :
+				mode == 3 ? "deQ" :
+							"inv",
+				cpu_of(rq), __num_called, __num_correct, __num_wrong_weight, __num_wrong_weight_real, __num_wrong_lagged_one, __num_wrong_lagged_sum);
+	if (!correct_lagged_one) {
+		if (mode != 0)
+			raw_spin_unlock(&rq->lock);
+		__update_lagged_printk(-1, NULL, cfs_rq, 0);
+		for (i = 0; i < num_task; i++) {
+			printk(KERN_ERR "[TSK_INFO] %2d/%-2d lagged: %lld saved: %lld target: %lld vruntime: %lld weight: %ld\n",
+				i + 1, num_task,
+				tsk_info[i].lagged,
+				tsk_info[i].lagged_saved,
+				tsk_info[i].lagged_target,
+				tsk_info[i].vruntime,
+				tsk_info[i].weight);
+		}
+		if (mode != 0)
+			raw_spin_lock(&rq->lock);
+	}
+		
+	preempt_enable();
+}
+
+/* gather data and print out when mode == -1 */
+static inline void __update_lagged_printk(int mode, struct sched_entity *se, struct cfs_rq *cfs_rq, s64 delta) {
+#define NUM_DEBUG_DATA 30
+	static DEFINE_SPINLOCK(debugging);
+	static struct {
+		int mode; /* 0: invalid entry
+					 1: update_lagged_target
+					 2: update_lagged
+					 3: update_lagged_enqueue
+					 4: update_lagged_dequeue
+					 5: update_target_vruntime_cache */
+		unsigned long jiffies;
+		int cpu;
+		int on_cpu;
+		int nr_running;
+		int pid;
+		u64 vruntime;
+		unsigned long weight;
+		unsigned long weight_real;
+		int on_rq;
+		unsigned long rq_weight;
+		s64 lagged;
+		s64 lagged_target;
+		s64 delta;
+		s64 rq_lagged;
+		s64 rq_target_vruntime;
+	} data[16][NUM_DEBUG_DATA];
+	//static atomic_t initialized = {0};
+	static atomic64_t idx_global[16] = { {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1} };
+	static atomic_t num_error = {0};
+	int idx, end;
+	int cpu, on_cpu;
+#ifdef CONFIG_LOCKDEP
+	int release_lock = 0;
+#endif
+
+	BUG_ON(mode == 0);
+	if (se && !cfs_rq)
+		cfs_rq = &rq_of(cfs_rq_of(se))->cfs;
+	cpu = rq_of(cfs_rq)->cpu;
+	
+	if (mode == -1)
+		goto printout;
+
+	
+	preempt_disable();
+	on_cpu = smp_processor_id();
+	idx = atomic64_inc_return(&idx_global[cpu]) % NUM_DEBUG_DATA;
+
+
+	data[cpu][idx].jiffies = jiffies;
+	data[cpu][idx].cpu = rq_of(cfs_rq)->cpu;
+	data[cpu][idx].on_cpu = on_cpu;
+	data[cpu][idx].nr_running = cfs_rq->h_nr_running;
+	if (se) {
+		data[cpu][idx].pid = task_of(se)->pid;
+		data[cpu][idx].vruntime = se->vruntime;
+		data[cpu][idx].weight = se->eff_load.weight;
+		data[cpu][idx].weight_real = se->lagged_weight;
+		data[cpu][idx].on_rq = se->on_rq;
+		data[cpu][idx].lagged = se->lagged;
+		data[cpu][idx].lagged_target = se->lagged_target;
+	} else {
+		data[cpu][idx].pid = 0;
+		data[cpu][idx].vruntime = 0;
+		data[cpu][idx].weight = cfs_rq->load.weight;
+		data[cpu][idx].weight_real = cfs_rq->lagged_weight;
+		data[cpu][idx].on_rq = -1;
+		data[cpu][idx].lagged = 0;
+		data[cpu][idx].lagged_target = 0;
+	}
+	data[cpu][idx].delta = delta;
+	data[cpu][idx].rq_lagged = cfs_rq->lagged;
+	data[cpu][idx].rq_target_vruntime = cfs_rq->target_vruntime;
+	data[cpu][idx].mode = mode;
+
+	preempt_enable();
+	return;
+
+printout:
+	preempt_disable();
+#ifdef CONFIG_LOCKDEP
+	if (lock_is_held(&rq_of(cfs_rq)->lock.dep_map)) {
+		release_lock = 1;
+		raw_spin_unlock(&rq_of(cfs_rq)->lock);
+	}
+#endif
+	spin_lock(&debugging);
+	idx = (atomic64_read(&idx_global[cpu]) + 1) % NUM_DEBUG_DATA;
+	end = idx;
+
+	if (idx == -1) {
+		printk(KERN_ERR "[%s] found no items\n", __func__);
+		goto out;
+	}
+
+
+	/* here, at least one item exists. */
+	while (data[cpu][idx].mode == 0)
+		idx = (idx + 1) % NUM_DEBUG_DATA;
+
+	printk(KERN_ERR "DEBUG_LAGGED %16s %8s %6s %2s %5s"
+					" %16s %6s %5s %2s %16s %16s %16s"
+					" %16s %16s\n",
+					"jiffies", "mode", "cpu", "nr", "pid",
+					"vruntime", "weight", "real", "on", "lagged", "lagged_target", "delta",
+					"rq->lagged", "rq->target");
+
+
+	do {
+		if (data[cpu][idx].mode == 0)
+			break;
+
+		printk(KERN_ERR "DEBUG_LAGGED %16ld %8s %2d->%-2d %2d %5d"
+						" %16lld %6ld %5ld %2d %16lld %16lld %16lld"
+						" %16lld %16lld\n",
+						data[cpu][idx].jiffies,
+						data[cpu][idx].mode == 1 ? "lagged_t" :
+						data[cpu][idx].mode == 2 ? "lagged__" :
+						data[cpu][idx].mode == 3 ? "enqueue_" :
+						data[cpu][idx].mode == 4 ? "dequeue_" :
+						data[cpu][idx].mode == 5 ? "target_$" :
+									"invalid",
+						data[cpu][idx].on_cpu,
+						data[cpu][idx].cpu,
+						data[cpu][idx].nr_running,
+						data[cpu][idx].pid,
+						data[cpu][idx].vruntime,
+						data[cpu][idx].weight,
+						data[cpu][idx].weight_real,
+						data[cpu][idx].on_rq,
+						data[cpu][idx].lagged,
+						data[cpu][idx].lagged_target,
+						data[cpu][idx].delta,
+						data[cpu][idx].rq_lagged,
+						data[cpu][idx].rq_target_vruntime);
+		data[cpu][idx].mode = 0;
+		idx = (idx + 1) % NUM_DEBUG_DATA;
+	} while (idx != end);
+out:
+	spin_unlock(&debugging);
+#ifdef CONFIG_LOCKDEP
+	if (release_lock)
+		raw_spin_lock(&rq_of(cfs_rq)->lock);
+#endif
+	preempt_enable();
+	if (atomic_inc_return(&num_error) >= 4)
+		panic("Bug in lagged");
+#undef NUM_DEBUG_DATA
+}
+#else /* DEBUG_LAGGED == 0 */
+#define __debug_gather(...) do{}while(0)
+#define __debug_update_target_vruntime_cache(...) do{}while(0)
+#define __update_lagged_printk(...) do{}while(0)
+#endif /* DEBUG_LAGGED == 0 */
+
+#if DEBUG_LAGGED > 0
+static void
+update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se, 
+							unsigned long old, unsigned long new, int mode) {
+	static int num_called = 0; 
+	
+	num_called++;
+	if (cfs_rq->h_nr_running == 0 && mode == 2 && cfs_rq->lagged_weight != old)
+		mode = -1;
+	
+	BUG_ON(&rq_of(cfs_rq)->cfs != cfs_rq);
+	
+	if (new == old)
+		goto out;
+	else if (new > old)
+		cfs_rq->lagged_weight += (new - old);
+	else {
+		if (cfs_rq->lagged_weight < (old - new)) {
+			mode = -2;
+			goto out;
+		}
+		cfs_rq->lagged_weight -= (old - new);
+	}
+	
+	/* DEBUG */
+out:	
+	__debug_gather(1,
+					rq_of(cfs_rq),
+					task_of(se),
+					old,
+					new,
+					mode,
+					mode < 0);
+}
+#define update_rq_lagged_weight_enqueue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 1)
+#define update_rq_lagged_weight_dequeue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 2)
+#define update_rq_lagged_weight_update(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 3)
+#else /* DEBUG_LAGGED == 0 */
+static void
+update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se, 
+							unsigned long old, unsigned long new) {
+	if (new == old)
+		return;
+	else if (new > old)
+		cfs_rq->lagged_weight += (new - old);
+	else if (unlikely(cfs_rq->lagged_weight < (old - new)))
+		return;
+	else
+		cfs_rq->lagged_weight -= (old - new);
+}
+#define update_rq_lagged_weight_enqueue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
+#define update_rq_lagged_weight_dequeue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
+#define update_rq_lagged_weight_update(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
+#endif /* DEBUG_LAGGED == 0 */
+
+static inline void __update_lagged_target(struct sched_entity *se, u64 target) {
+	/* lagged_delta when target changed.
+	 * lagged_prev = (target_prev - vruntime) * lagged_weight
+	 * lagged_curr = (target_curr - vruntime) * lagged_weight
+	 * lagged_curr - lagged_prev = ( (target_curr - vruntime) - (target_prev - vruntime) )* lagged_weight
+	 * delta_lagged = (target_curr - target_prev)* lagged_weight
+	 *
+	 * Note that this amount of difference of lagged has already applied to cfs_rq->lagged.
+	 * In addition, note that we use @lagged_weight. When this value applied to cfs_rq->lagged,
+	 * se->lagged_weight value was used. @eff_load.weight is a kind of normalized value.
+	 */
+	 __update_lagged_printk(1, se, NULL, (s64) (target - se->lagged_target) * se->lagged_weight);
+	se->lagged += (s64) (target - se->lagged_target) * se->lagged_weight;
+	se->lagged_target = target;
+}
+
+#if 0 /* useless */
+static void update_lagged_target(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+	u64 target = cfs_rq_target_vruntime(cfs_rq);
+
+	if (unlikely(se->lagged_target != target))
+		__update_lagged_target(se, target);
+}
+#endif
+
+static inline void update_lagged(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+	u64 target = cfs_rq_target_vruntime(cfs_rq);
+	s64 delta, lagged;
+
+	/* if not on_rq, se->lagged is meaningless and we should not apply it to cfs_rq */
+	if (!se->on_rq)
+		return;
+
+	if (unlikely(se->lagged_target != target))
+		__update_lagged_target(se, target);
+
+	lagged = task_lagged(se, target);
+	
+	delta = lagged - se->lagged;
+	if (delta == 0)
+		return;
+	__update_lagged_printk(2, se, cfs_rq, delta);
+	se->lagged = lagged;
+	cfs_rq->lagged += delta;
+}
+
+static inline void update_lagged_enqueue(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+	u64 target = cfs_rq_target_vruntime(cfs_rq);
+#ifdef CONFIG_GPFS_CONSIDER_UTIL
+	se->lagged = (target - se->vruntime) * se->lagged_weight;
+#else
+	se->lagged = (target - se->vruntime) * se->eff_load.weight;
+#endif
+	se->lagged_target = target;
+	__update_lagged_printk(3, se, cfs_rq, 0);
+	cfs_rq->lagged += se->lagged;
+	__debug_update_target_vruntime_cache(cfs_rq, cfs_rq->target_vruntime, 2);
+}
+
+static inline void update_lagged_dequeue(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+	__update_lagged_printk(4, se, cfs_rq, 0);
+	cfs_rq->lagged -= se->lagged;
+	se->lagged = 0;
+	se->lagged_target = 0;
+	__debug_update_target_vruntime_cache(cfs_rq, cfs_rq->target_vruntime, 3);
+}
+
+#ifdef CONFIG_GPFS_MIN_TARGET
+static u64 __get_min_target_traverse(struct rq *this_rq) {
+	u64 target, min_target = ULLONG_MAX;
+	int running = 0, cpu;
+	struct rq *rq;
+
+	gpfs_stat_inc(this_rq, get_traverse_rq_count);
+
+	for_each_possible_cpu(cpu) {
+		if (idle_cpu(cpu))
+			continue;
+
+		running++;
+		rq = cpu_rq(cpu);
+		target = rq->cfs.target_vruntime;
+
+		if (target < min_target)
+			min_target = target;
+	}
+
+	if (running) {
+		return min_target;
+
+	} else {
+		struct sd_vruntime *sdv = this_rq->sd_vruntime;
+		while (sdv && sdv->parent)
+			sdv = sdv->parent;
+
+		if (unlikely(!sdv))
+			return 0;
+
+		return atomic64_read(&sdv->target); /* target of the highest level */
+	}
+}
+
+/* please hold rcu_read_lock() */
+static u64 get_min_target(struct rq *rq) {
+	struct sd_vruntime *sdv = rq->sd_vruntime;
+	struct sd_vruntime *min_child;
+	u64 min_target;
+
+	while (sdv && sdv->parent)
+		sdv = sdv->parent;
+
+	if (unlikely(!sdv))
+		return 0;
+
+	if (unlikely(atomic_read(&sdv->nr_busy) == 0))
+		return atomic64_read(&sdv->target); /* target of the highest level */
+
+	while (sdv && sdv->child) {
+		min_child = (struct sd_vruntime *) atomic64_read(&sdv->min_child);
+		if (likely(min_child)) {
+			sdv = min_child;
+		} else {
+			struct sd_vruntime *child = sdv->child;
+			u64 target;
+			min_child = NULL;
+			min_target = 0;
+			do {
+				if (atomic_read(&child->nr_busy) == 0)
+					goto next_child;
+
+				target = atomic64_read(&child->target);
+				if (!min_child || target < min_target) {
+					min_child = child;
+					min_target = target;
+				}
+next_child:
+				child = child->next;
+			} while (child != sdv->child);
+
+			if (likely(min_child)) {
+				/* update the cache */
+				atomic64_set(&sdv->min_child, (long) min_child);
+				atomic64_set(&sdv->min_target, (long) min_target);
+				
+				sdv = min_child;
+				/* to prevent double counting, increment here */
+				gpfs_stat_inc(rq, get_traverse_child_count);
+			} else {
+				return __get_min_target_traverse(rq);
+			}
+		}
+	}
+
+	if (unlikely(!sdv || atomic64_read(&sdv->min_child) == 0))
+		return __get_min_target_traverse(rq);
+
+	return atomic64_read(&sdv->min_target);
+}
+
+static void update_min_target(struct sd_vruntime *sdv, u64 target, bool update) {
+	struct sd_vruntime *parent = sdv->parent;
+	struct sd_vruntime *min_child;
+	u64 min_target;
+
+	if (!parent)
+		return;
+
+	min_child = (struct sd_vruntime *)atomic64_read(&parent->min_child);
+	if (min_child == sdv) {
+		if (update)
+			atomic64_set(&parent->min_target, target);
+		return;
+	}
+
+	min_target = atomic64_read(&parent->min_target);
+	if ((min_child == NULL && !update) || target < min_target) {
+		atomic64_set(&parent->min_target, target);
+		atomic64_set(&parent->min_child, (long) sdv);
+	} else if (target == min_target && (min_child == NULL || update)) {
+		/* I'm the latest child to reach @target. */
+		atomic64_set(&parent->min_child, (long) sdv);
+	}
+}
+
+static void update_min_target_rq(struct cfs_rq *cfs_rq, u64 target) {
+	struct sd_vruntime *parent = rq_of(cfs_rq)->sd_vruntime;
+	struct cfs_rq *min_child = (struct cfs_rq *) atomic64_read(&parent->min_child);
+	u64 min_target;
+
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+	if (rq_of(cfs_rq)->infeasible_weight)
+		return;
+#endif
+
+	if (min_child == cfs_rq) {
+		atomic64_set(&parent->min_target, target);
+		return;
+	}
+	
+	min_target = atomic64_read(&parent->min_target);
+	if (min_child == NULL || target < min_target) {
+		atomic64_set(&parent->min_target, target);
+		atomic64_set(&parent->min_child, (long) cfs_rq);
+	} else if (target == min_target) {
+		/* I'm the latest child to reach @target. */
+		atomic64_set(&parent->min_child, (long) cfs_rq);
+	}
+}
+
+/* called from transit_busy_to_idle() */
+static void delete_min_target_rq(struct cfs_rq *cfs_rq) {
+	struct sd_vruntime *parent = rq_of(cfs_rq)->sd_vruntime;
+	struct cfs_rq *min_rq = (struct cfs_rq *) atomic64_read(&parent->min_child);
+	struct sd_vruntime *child, *min_child;
+
+	if (min_rq != cfs_rq)
+		return;
+	
+	/* min_rq == cfs_rq */
+	atomic64_set(&parent->min_child, (long) NULL);
+	if (atomic_read(&parent->nr_busy) > 0) {
+		int cpu;
+		int this_cpu = cpu_of(rq_of(cfs_rq));
+		struct cfs_rq *child_rq;
+		u64 target, min_target = 0;
+		min_rq = NULL;
+
+		for_each_cpu(cpu, to_cpumask(parent->span)) {
+			if (cpu == this_cpu)
+				continue;
+			if (idle_cpu(cpu))
+				continue;
+			child_rq = &cpu_rq(cpu)->cfs;
+			target = child_rq->target_vruntime;
+			if (min_rq == NULL || target < min_target) {
+				min_rq = child_rq;
+				min_target = target;
+			}
+		}
+
+		atomic64_set(&parent->min_target, min_target);
+		atomic64_set(&parent->min_child, (long) min_rq);
+	}
+
+	for (child = parent, parent = parent->parent; parent; 
+								child = parent, parent = parent->parent) {
+		min_child = (struct sd_vruntime *) atomic64_cmpxchg(&parent->min_child, (long) child, (long) NULL);
+		if (min_child != child)
+			return;
+	}
+}
+#endif /* CONFIG_GPFS_MIN_TARGET */
+
+#define is_lagged_overflowed(lagged, add) (((add) < 0) || ((lagged) > 0 && ((lagged) + (add)) < 0))
+/* corner case. to prevent overflow. */
+static 
+void __update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target) {
+	s64 lagged = cfs_rq->lagged;
+	s64 my_target = (s64) cfs_rq->target_vruntime;
+	s64 add = (s64) (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq);
+	u64 interval = rq_of(cfs_rq)->sd_vruntime->interval;
+	gpfs_msg("[ERROR] lagged_overflow cpu: %d old: %lld new: %lld lagged_weight: %ld lagged: %lld add: %lld\n",
+			rq_of(cfs_rq)->cpu, my_target, target, cfs_rq_lagged_weight_sum(cfs_rq), cfs_rq->lagged, add);
+
+	while (is_lagged_overflowed(lagged, add)
+				&& (target > (my_target + interval))) {
+		target = target - interval;
+		lagged = cfs_rq->lagged;
+		add = (s64) (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq);
+	}
+
+	if (unlikely(is_lagged_overflowed(lagged, add))) {
+		/* I wonder call panic() is necessary... 'return' may be a good solution. */
+		panic("[CANNOT_FIXED] lagged_overflow cpu: %d old: %lld new: %lld lagged_weight: %ld lagged: %lld add: %lld\n",
+				rq_of(cfs_rq)->cpu, my_target, target, cfs_rq_lagged_weight_sum(cfs_rq), cfs_rq->lagged, add);
+	}
+	
+
+	cfs_rq->lagged = lagged;
+	/* must update target here, since the target was modified. */
+	cfs_rq->target_vruntime = target;
+#ifdef CONFIG_GPFS_MIN_TARGET
+	update_min_target_rq(cfs_rq, target);
+#endif
+}
+
+static inline
+void update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target, int locked) {
+	/* rq->lock must be held */
+	s64 my_target = (s64) cfs_rq->target_vruntime;
+
+	if (likely(target > my_target)) {
+		s64 add;
+		__update_lagged_printk(5, NULL, cfs_rq, (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq));
+		__debug_update_target_vruntime_cache(cfs_rq, target, locked);
+		add = (s64) (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq);
+		if (unlikely(is_lagged_overflowed(cfs_rq->lagged, add))) /* overflow occurred! */
+			return __update_target_vruntime_cache(cfs_rq, target);
+		cfs_rq->lagged += add; 
+	} else if (target == my_target)
+		return;
+	else {
+		gpfs_msg("[ERROR] backward_target_vruntime cpu: %d before: %lld after: %lld\n",
+					rq_of(cfs_rq)->cpu, my_target, target);
+		return;
+	}
+	
+	cfs_rq->target_vruntime = target;
+#ifdef CONFIG_GPFS_MIN_TARGET
+	update_min_target_rq(cfs_rq, target);
+#endif
+}
+#endif /* CONFIG_GPFS */
 
 /*
  * Enqueue an entity into the rb-tree:
@@ -590,6 +1509,54 @@ int sched_proc_update_handler(struct ctl_table *table, int write,
 }
 #endif
 
+#ifdef CONFIG_GPFS
+static int update_eff_load(struct sched_entity *task_se, struct sched_entity *plast);
+/*
+ * delta /= w
+ */
+static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
+{
+	if (unlikely(se->eff_load.weight == 0)) {
+		/* for tasks recently forked, 
+		 * effective weight have not been initialized.
+		 * Initialize it! */
+		update_eff_load(se, NULL);
+	}
+	if ((se->eff_load.weight != NICE_0_LOAD))
+		delta = __calc_delta(delta, NICE_0_LOAD, &se->eff_load);
+
+	return delta;
+}
+
+#ifdef CONFIG_GPFS_AMP
+static inline u64 __calc_delta_effi(u64 delta, unsigned long effi, u32 *rem)
+{
+	if (effi == NICE_0_LOAD)
+		return delta;
+	
+	delta = delta * effi;
+	*rem += delta % SCHED_LOAD_SCALE;
+	delta = delta >> SCHED_LOAD_SHIFT;
+	if (unlikely(*rem >= SCHED_LOAD_SCALE)) {
+		*rem -= SCHED_LOAD_SCALE;
+		delta++;
+	}
+
+	return delta;
+}
+static inline u64 calc_delta_vruntime(u64 delta, unsigned long effi, struct sched_entity *se)
+{
+	delta = calc_delta_fair(delta, se);
+	return __calc_delta_effi(delta, effi, &se->vruntime_rem);
+}
+
+#ifdef CONFIG_CFS_BANDWIDTH
+static inline u64 calc_delta_perf(u64 delta, unsigned long effi, struct sched_entity *se) {
+	return __calc_delta_effi(delta, effi, &se->perf_rem);
+}
+#endif
+#endif /* CONFIG_GPFS_AMP */
+#else
 /*
  * delta /= w
  */
@@ -600,6 +1567,7 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 
 	return delta;
 }
+#endif
 
 /*
  * The idea is to set a period in which each task runs once.
@@ -703,6 +1671,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
+#ifdef CONFIG_GPFS_AMP
+	int type = rq_of(cfs_rq)->cpu_type;
+#endif
 
 	if (unlikely(!curr))
 		return;
@@ -719,6 +1690,39 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq, exec_clock, delta_exec);
 
+#ifdef CONFIG_GPFS
+#ifdef CONFIG_GPFS_AMP
+	curr->sum_type_runtime[type] += delta_exec;
+#endif
+
+	if (entity_is_task(curr)) {
+		struct task_struct *curtask = task_of(curr);
+#ifdef CONFIG_GPFS_AMP
+		curr->vruntime += calc_delta_vruntime(delta_exec, se_effi(curr, type), curr);
+#else /* !CONFIG_GPFS_AMP */
+		curr->vruntime += calc_delta_fair(delta_exec, curr);
+#endif /* !CONFIG_GPFS_AMP */
+		update_lagged(curr, &rq_of(cfs_rq)->cfs);
+		update_min_vruntime(cfs_rq);
+
+		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+		cpuacct_charge(curtask, delta_exec);
+		account_group_exec_runtime(curtask, delta_exec);
+	} else {
+		/* vruntime of sched_entity for a group is the minimum vruntime of its cfs_rq. */
+		/* Assume that vruntime of the children is updated before. */
+		curr->vruntime = curr->my_q->min_vruntime;
+		update_min_vruntime(cfs_rq);
+	}
+	
+#ifdef CONFIG_GPFS_AMP
+	/* On AMP systems, scale delta_exec based on efficiency for CFS_BANDWIDTH.
+	   Now, CFS_BANDWIDTH controls the received performance. */
+	delta_exec = calc_delta_perf(delta_exec, se_effi(curr, type), curr);
+	curr->sum_perf_runtime += delta_exec;
+#endif
+	account_cfs_rq_runtime(cfs_rq, delta_exec);
+#else /* !CONFIG_GPFS */
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
 	update_min_vruntime(cfs_rq);
 
@@ -729,8 +1733,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		cpuacct_charge(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
-
+	
 	account_cfs_rq_runtime(cfs_rq, delta_exec);
+#endif /* !CONFIG_GPFS */
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -1179,7 +2184,9 @@ static unsigned long weighted_cpuload(const int cpu);
 static unsigned long source_load(int cpu, int type);
 static unsigned long target_load(int cpu, int type);
 static unsigned long capacity_of(int cpu);
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 static long effective_load(struct task_group *tg, int cpu, long wl, long wg);
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /* Cached statistics for all CPUs within a node */
 struct numa_stats {
@@ -2437,10 +3444,12 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	update_load_sub(&cfs_rq->load, se->load.weight);
 	if (!parent_entity(se))
 		update_load_sub(&rq_of(cfs_rq)->load, se->load.weight);
+#ifdef CONFIG_SMP
 	if (entity_is_task(se)) {
 		account_numa_dequeue(rq_of(cfs_rq), task_of(se));
 		list_del_init(&se->group_node);
 	}
+#endif
 	cfs_rq->nr_running--;
 }
 
@@ -2466,7 +3475,11 @@ static long calc_cfs_shares(struct cfs_rq *cfs_rq, struct task_group *tg)
 {
 	long tg_weight, load, shares;
 
+#ifdef CONFIG_GPFS
+	tg_weight = atomic_long_read(&tg->load_sum);
+#else
 	tg_weight = calc_tg_weight(tg, cfs_rq);
+#endif
 	load = cfs_rq->load.weight;
 
 	shares = (tg->shares * load);
@@ -2769,6 +3782,124 @@ static inline void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 	}
 }
 
+#ifdef CONFIG_GPFS
+/* rq->lock held */
+static inline void __update_tg_load_sum(struct task_group *tg, unsigned long old, unsigned long new)
+{
+	unsigned long delta;
+	unsigned long ret;
+
+up:
+	if (!tg) 
+		return;
+
+	if (new > old) {
+		delta = new - old;
+		ret = atomic_long_add_return(delta, &tg->load_sum);
+		if (ret == delta) /* load_sum was zero => go to parent */ {
+			old = 0;
+			new = tg->shares;
+			tg = tg->parent;
+			goto up;
+		}
+	} else { /* new < old */
+		delta = old - new;
+		ret = atomic_long_sub_return(delta, &tg->load_sum);
+		if (ret == 0) { /* now, all tasks in group are idle => go to parent */
+			old = tg->shares;
+			new = 0;
+			tg = tg->parent;
+			goto up;
+		}
+	} 
+}
+
+//#define DEBUG_TG_LOAD_SUM_CONTRIB
+#ifdef DEBUG_TG_LOAD_SUM_CONTRIB
+inline void __debug_tg_load_sum_contrib(const char *func_name, const char *header,
+								struct sched_entity *se, struct task_group *tg,
+								unsigned long old, unsigned long new,
+								int flag) {
+	BUG_ON(se == NULL);
+	gpfs_msg("[%s] %s tg_load_sum_contrib: %ld old: %ld new: %ld p->pid: %d p->comm: %s p->state: %ld(%s) p->weight: %ld group_id: %d (level: %d) parent_tg_id: %d (level: %d) flag: %s\n",
+			func_name, header, se->tg_load_sum_contrib, old, new,
+			entity_is_task(se) ? task_of(se)->pid : -1, 
+			entity_is_task(se) ? task_of(se)->comm : "Not_a_Task",
+			entity_is_task(se) ? task_of(se)->state : -2,
+			entity_is_task(se) ? (	task_of(se)->state == -1 ? "unrunnable" :
+									task_of(se)->state == 0 ? "runnable" :
+															"stopped"	)
+								: "Not_a_task",
+			se->load.weight,
+			tg == NULL				? -1 
+									: tg->css.cgroup == NULL	? tg->css.id 
+																: tg->css.cgroup->id,
+			tg == NULL				? -1 
+									: tg->css.cgroup == NULL	? -2 
+																: tg->css.cgroup->level,
+			tg == NULL	? -1
+						: tg->parent == NULL	? -100
+												: tg->parent->css.cgroup == NULL	? tg->parent->css.id 
+																						: tg->parent->css.cgroup->id,
+			tg == NULL	? -1 
+						: tg->parent == NULL	? -100 
+												: tg->parent->css.cgroup == NULL	? -2
+																					: tg->parent->css.cgroup->level,
+
+			flag == TG_LOAD_SUM_SLEEP ? "sleep" :
+			flag == TG_LOAD_SUM_WAKEUP ? "wakeup" :
+			flag == TG_LOAD_SUM_DETACH ? "detach" :
+			flag == TG_LOAD_SUM_ATTACH ? "attach" :
+			flag == TG_LOAD_SUM_CHANGE ? "change" :
+										 "unknown"
+			);
+}
+#else
+#define __debug_tg_load_sum_contrib(...) do{}while(0)
+#endif 
+
+/* rq->lock held */
+inline void update_tg_load_sum(struct sched_entity *se, struct task_group *tg, 
+								unsigned long old, unsigned long new, 
+								int flag) 
+{
+	/* load_sum is not used for root_task_group */
+	if (tg == &root_task_group)
+		return;
+	
+	__debug_tg_load_sum_contrib(__func__,
+				tg == &root_task_group ? "root_task_group" :
+				((flag == TG_LOAD_SUM_CHANGE) && se->tg_load_sum_contrib == 0) ? "change_load_while_sleep" :
+				((flag == TG_LOAD_SUM_DETACH) && se->tg_load_sum_contrib == 0 && (tg && tg->parent == &root_task_group)) ? "detach_from_root" :
+				se->tg_load_sum_contrib != old ? "contrib!=old" :
+				old == new ? "old==new" :
+				"normal", 
+				se, tg, old, new, flag);
+
+	/* weight changes, attach, or detach, but the task is sleeping or stopped.
+	 * This change will be applied when the task will wake up. */
+	if (se->tg_load_sum_contrib == 0 && 
+		(flag == TG_LOAD_SUM_CHANGE || flag == TG_LOAD_SUM_DETACH))
+		return;
+	if (task_of(se)->state != 0 && flag == TG_LOAD_SUM_ATTACH)
+		return;
+
+
+	if (unlikely(se->tg_load_sum_contrib != old)) {
+		__debug_tg_load_sum_contrib(__func__, "contrib!=old", se, tg, old, new, flag);
+		return;
+	}
+
+	if (unlikely(old == new))
+		return;
+
+	BUG_ON(!tg || !se);
+	
+	se->tg_load_sum_contrib = new;
+	__update_tg_load_sum(tg, old, new);
+}
+#endif /* CONFIG_GPFS */
+
 /*
  * Called within set_task_rq() right before setting a task's cpu. The
  * caller only guarantees p->pi_lock is held; no other assumptions,
@@ -3026,7 +4157,13 @@ static inline unsigned long cfs_rq_load_avg(struct cfs_rq *cfs_rq)
 	return cfs_rq->avg.load_avg;
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 static int idle_balance(struct rq *this_rq);
+#endif
+#ifdef CONFIG_GPFS
+static inline int target_vruntime_balance(struct rq *rq, enum cpu_idle_type idle);
+void transit_idle_to_busy(struct rq *rq);
+#endif
 
 #else /* CONFIG_SMP */
 
@@ -3054,6 +4191,13 @@ static inline int idle_balance(struct rq *rq)
 	return 0;
 }
 
+#ifdef CONFIG_GPFS
+static inline int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
+{
+	return 0;
+}
+void transit_idle_to_busy(struct rq *rq) {}
+#endif
 #endif /* CONFIG_SMP */
 
 static void enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -3131,6 +4275,230 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+#ifdef CONFIG_GPFS
+#ifdef CONFIG_GPFS_NORMAL_V2
+static void
+__gpfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttled) {
+	struct cfs_rq *cfs_rq;
+	u64 target;
+	u64 interval;
+	u64 vruntime;
+	
+	if (!entity_is_task(se)) {
+		update_min_vruntime(se->my_q);
+		se->vruntime = se->my_q->min_vruntime;
+		se->sleep_start = 0;
+		se->sleep_target = 0;
+		return;
+	}
+	
+	if (unlikely(se->sleep_target == 0)) {
+		/* while initialization, rq->cfs.target_vruntime == 0 and sleep_target == 0.
+		   Thus, treat this as exceptional cases. */
+		update_min_vruntime(&rq->cfs);
+		se->vruntime = rq->cfs.min_vruntime;
+		goto out;
+	}
+
+	cfs_rq = &rq->cfs;
+	interval = cfs_rq->target_interval;
+
+#if 0
+	if (!throttled && se->sleep_start) {
+		/* ignore the short sleep */
+		target = rq_clock(rq);
+		vruntime = se->sleep_start;
+
+		if (unlikely(vruntime > target))
+			goto out;
+
+		if (target - vruntime <= interval) /* shorter than one interval */
+			goto out;
+	}
+#endif
+
+	target = cfs_rq->target_vruntime;
+	vruntime = se->vruntime;
+
+	if (se->sleep_target >= target)
+		goto out;
+	
+	if (vruntime_passed(se->vruntime, target - interval))
+		goto out;
+	
+	rcu_read_lock();
+	target = get_min_target(rq);
+	rcu_read_unlock();
+
+	if (unlikely(target < interval)) /* maybe while initialization */
+		goto out;
+
+	if (se->sleep_target >= target)
+		goto out;
+	
+	if (vruntime_passed(se->vruntime, target - interval))
+		goto out;
+
+#define INTERACTIVE_JOB_UTIL_AVG (SCHED_LOAD_SCALE >> 4)
+#define BATCH_JOB_UTIL_AVG (SCHED_LOAD_SCALE - (SCHED_LOAD_SCALE >> 5))
+	if (se->avg.util_avg > BATCH_JOB_UTIL_AVG) 
+		goto out; /* continue with the previous vruntime */
+	else if (se->avg.util_avg < INTERACTIVE_JOB_UTIL_AVG) {
+		vruntime = target - (interval >> 1);
+		//update_min_vruntime(cfs_rq);
+		//vruntime = cfs_rq->min_vruntime;
+	} else {
+		if (unlikely(vruntime_passed(se->vruntime, se->sleep_target)))
+			vruntime = se->sleep_target - (interval >> 1);
+		else
+			vruntime -= (interval - (se->sleep_target - se->vruntime)) >> 1;
+		vruntime += (target - se->sleep_target) * (SCHED_LOAD_SCALE - se->avg.util_avg) >> SCHED_LOAD_SHIFT;
+	}
+	
+	if (vruntime_passed(se->vruntime, vruntime))
+		goto out;
+
+	/*printk(KERN_ERR "pid: %d comm: %s vruntime: %lld -> %lld sleep_start: %lld sleep_target: %lld min_target: %lld\n",
+			task_of(se)->pid, task_of(se)->comm, se->vruntime, vruntime, se->sleep_start, se->sleep_target, target); */
+	BUG_ON(vruntime < se->vruntime);
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
+	se->num_normalization++;
+	se->added_normalization += vruntime - se->vruntime;
+	if ((vruntime - se->vruntime) > se->max_added_normalization)
+		se->max_added_normalization = vruntime - se->vruntime;
+#endif
+	se->vruntime = vruntime; 
+
+out:
+	se->sleep_start = 0;
+	se->sleep_target = 0;
+}
+#else /* !CONFIG_GPFS_NORMAL_V2 */
+/* @throttled: 1 if called from gpfs_enqueue_throttled() */
+static void
+__gpfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttled) {
+	struct cfs_rq *cfs_rq;
+	u64 target;
+	u64 interval;
+	u64 vruntime;
+
+	if (!entity_is_task(se)) {
+		update_min_vruntime(se->my_q);
+		se->vruntime = se->my_q->min_vruntime;
+		se->sleep_start = 0;
+		return;
+	}
+
+	cfs_rq = &rq->cfs;
+	interval = cfs_rq->target_interval;
+
+	if (!throttled && se->sleep_start) {
+		/* ignore the short sleep */
+		target = rq_clock(rq);
+		vruntime = se->sleep_start;
+
+		if (vruntime >= target)
+			goto out;
+
+		if (target - vruntime <= interval) /* shorter than one interval */
+			goto out;
+	}
+
+	vruntime = se->vruntime;
+
+#ifdef CONFIG_GPFS_MIN_TARGET
+	if (!throttled && vruntime_passed(vruntime, cfs_rq->min_vruntime))
+		goto out;
+#endif /* CONFIG_GPFS_MIN_TARGET */
+	
+	target = cfs_rq->target_vruntime;
+	if (vruntime_passed(vruntime, target))
+		goto out;
+	
+	if (unlikely(target < interval)) /* maybe while initialization */
+		goto out;
+
+	if (vruntime_passed(vruntime, target - interval))
+		goto out;
+
+#ifdef CONFIG_GPFS_MIN_TARGET
+	rcu_read_lock();
+	target = get_min_target(rq);
+	rcu_read_unlock();
+
+	if (unlikely(target < interval)) /* maybe while initialization */
+		goto out;
+
+	if (vruntime_passed(vruntime, target - interval))
+		goto out;
+
+	/* hard to explain.... but, I want (target - interval) + (vruntime % interval) / 2 */
+	if (throttled)
+		vruntime = (target - interval) + ((vruntime % interval));
+	else
+		vruntime = (target - interval) + ((vruntime % interval) >> 1);
+#else /* !CONFIG_GPFS_MIN_TARGET */
+	/* hard to explain.... but, I want (target - interval) + (vruntime % interval) / 2 */
+	vruntime = (target - interval) + (vruntime % interval);
+	if (vruntime_passed(vruntime, cfs_rq->min_vruntime))
+		vruntime = cfs_rq->min_vruntime;
+#endif /* !CONFIG_GPFS_MIN_TARGET */
+
+	if (vruntime_passed(se->vruntime, vruntime))
+		goto out;	
+
+	BUG_ON(vruntime < se->vruntime);
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
+	se->num_normalization++;
+	se->added_normalization += vruntime - se->vruntime;
+	if ((vruntime - se->vruntime) > se->max_added_normalization)
+		se->max_added_normalization = vruntime - se->vruntime;
+#endif
+	se->vruntime = vruntime; 
+out:
+	se->sleep_start = 0;
+}
+#endif /* !CONFIG_GPFS_NORMAL_V2 */
+
+/* call only when wake up or waking up a task */
+static void
+gpfs_enqueue_sleeper(struct rq *rq, struct sched_entity *se) {
+	__gpfs_enqueue_normalization(rq, se, 0);
+}
+
+static void
+gpfs_dequeue_sleeper(struct rq *rq, struct sched_entity *se) {
+	if (!se->sleep_start) {
+		se->sleep_start = rq_clock(rq);
+#ifdef CONFIG_GPFS_NORMAL_V2
+		se->sleep_target = rq->cfs.target_vruntime;
+#endif
+	}
+}
+
+static void
+gpfs_enqueue_throttled(struct rq *rq, struct sched_entity *se) {
+	__gpfs_enqueue_normalization(rq, se, 1);
+}
+
+static inline void
+account_start_debit(struct cfs_rq *cfs_rq, struct sched_entity *se) {
+	/*
+	 * When a thread forks,
+	 * the 'current' period is already promised to the current tasks,
+	 * however the extra weight of the new task will slow them down a
+	 * little, place the new task so that it fits in the slot that
+	 * stays open at the end.
+	 */
+	if (sched_feat(START_DEBIT))
+		se->vruntime += sched_vslice(cfs_rq, se);
+}
+
+static inline void
+place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
+{
+}
+#else /* !CONFIG_GPFS */
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -3162,8 +4530,12 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	/* ensure we never gain time by being placed backwards. */
 	se->vruntime = max_vruntime(se->vruntime, vruntime);
 }
+#endif /* !CONFIG_GPFS */
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
+#ifdef CONFIG_GPFS_BANDWIDTH
+static int cfs_rq_throttled(struct cfs_rq *cfs_rq);
+#endif /* CONFIG_GPFS_BANDWIDTH */
 
 static inline void check_schedstat_required(void)
 {
@@ -3188,12 +4560,14 @@ static inline void check_schedstat_required(void)
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+#ifndef CONFIG_GPFS /* for GPFS, do not normalize vruntime based on min_vruntime */
 	/*
 	 * Update the normalized vruntime before updating min_vruntime
 	 * through calling update_curr().
 	 */
 	if (!(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_WAKING))
 		se->vruntime += cfs_rq->min_vruntime;
+#endif /* !CONFIG_GPFS */
 
 	/*
 	 * Update run-time statistics of the 'current'.
@@ -3222,6 +4596,17 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		list_add_leaf_cfs_rq(cfs_rq);
 		check_enqueue_throttle(cfs_rq);
 	}
+#ifdef CONFIG_GPFS_BANDWIDTH
+	/* do this after calling check_enqueue_throttle()
+		since it re-check the state of cfs_rq */
+	if (!cfs_rq_throttled(cfs_rq)) { /* not throttled */
+		list_add(&se->state_node, cfs_rq->active_q);
+		se->state_q = cfs_rq->active_q;
+	} else { /* throttled */
+		list_add(&se->state_node, cfs_rq->thrott_q);
+		se->state_q = cfs_rq->thrott_q;
+	}
+#endif /* CONFIG_GPFS_BANDWIDTH */
 }
 
 static void __clear_buddies_last(struct sched_entity *se)
@@ -3290,6 +4675,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
 
+#ifndef CONFIG_GPFS /* for GPFS, do not normalize vruntime while dequeueing */
 	/*
 	 * Normalize the entity after updating the min_vruntime because the
 	 * update can refer to the ->curr item and we need to reflect this
@@ -3297,6 +4683,18 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 */
 	if (!(flags & DEQUEUE_SLEEP))
 		se->vruntime -= cfs_rq->min_vruntime;
+#endif /* !CONFIG_GPFS */
+#ifdef CONFIG_GPFS_BANDWIDTH
+	if (se->state_q == cfs_rq->thrott_q && entity_is_task(se)
+			&& (se->sleep_start == 0 || cfs_rq->throttled_clock < se->sleep_start)) {
+		se->sleep_start = cfs_rq->throttled_clock;
+#ifdef CONFIG_GPFS_NORMAL_V2
+		se->sleep_target = cfs_rq->throttled_target;
+#endif
+	}
+	list_del(&se->state_node);
+	se->state_q = NULL;
+#endif /* CONFIG_GPFS_BANDWIDTH */
 
 	/* return excess runtime on last dequeue */
 	return_cfs_rq_runtime(cfs_rq);
@@ -3363,6 +4761,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	update_stats_curr_start(cfs_rq, se);
 	cfs_rq->curr = se;
+
 #ifdef CONFIG_SCHEDSTATS
 	/*
 	 * Track our maximum slice length, if the CPU's load is at
@@ -3375,6 +4774,20 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 #endif
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+#ifdef CONFIG_GPFS_BANDWIDTH
+	if (se->state_q == cfs_rq->thrott_q) {
+		if (entity_is_task(se) && !se->sleep_start) {
+			se->sleep_start = cfs_rq->throttled_clock;
+#ifdef CONFIG_GPFS_NORMAL_V2
+			se->sleep_target = cfs_rq->throttled_target;
+#endif
+		}
+		//gpfs_enqueue_sleeper(rq_of(cfs_rq), se);
+		gpfs_enqueue_throttled(rq_of(cfs_rq), se);
+		list_move(&se->state_node, cfs_rq->active_q);
+		se->state_q = cfs_rq->active_q;
+	}
+#endif /* CONFIG_GPFS_BANDWIDTH */
 }
 
 static int
@@ -3739,6 +5152,37 @@ static int tg_throttle_down(struct task_group *tg, void *data)
 
 	return 0;
 }
+#ifdef CONFIG_GPFS_BANDWIDTH
+/* call before updating cfs_rq->throttled_clock */
+static void gpfs_throttle_cfs_rq(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *se, *n;
+	struct list_head *temp_list;
+	if (unlikely(!list_empty(cfs_rq->thrott_q))) {
+		/* empty the thrtt_q before switch queues. */
+		list_for_each_entry_safe(se, n, cfs_rq->thrott_q, state_node) {
+			gpfs_stat_inc(rq_of(cfs_rq), iterate_thrott_q);
+
+			/* remember throttled time before cfs_rq replace it the recent value */
+			if (entity_is_task(se) && 
+					(se->sleep_start == 0 || cfs_rq->throttled_clock < se->sleep_start)) {
+				se->sleep_start = cfs_rq->throttled_clock;
+#ifdef CONFIG_GPFS_NORMAL_V2
+				se->sleep_target = cfs_rq->throttled_target;
+#endif
+			}
+			/* move to active_q */
+			list_move(&se->state_node, cfs_rq->active_q);
+			se->state_q = cfs_rq->active_q;
+		}
+	}
+
+	/* move all entities to thrott_q by switching two queues. */
+	temp_list = cfs_rq->thrott_q;
+	cfs_rq->thrott_q = cfs_rq->active_q;
+	cfs_rq->active_q = temp_list;
+}
+#endif /* CONFIG_GPFS_BANDWIDTH */
 
 static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 {
@@ -3773,8 +5217,15 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	if (!se)
 		sub_nr_running(rq, task_delta);
 
+#ifdef CONFIG_GPFS_BANDWIDTH
+	gpfs_throttle_cfs_rq(cfs_rq);
+#endif
+
 	cfs_rq->throttled = 1;
 	cfs_rq->throttled_clock = rq_clock(rq);
+#ifdef CONFIG_GPFS_NORMAL_V2
+	cfs_rq->throttled_target = __cfs_rq_target_vruntime(cfs_rq);
+#endif
 	raw_spin_lock(&cfs_b->lock);
 	empty = list_empty(&cfs_b->throttled_cfs_rq);
 
@@ -4159,6 +5610,12 @@ static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	cfs_rq->runtime_enabled = 0;
 	INIT_LIST_HEAD(&cfs_rq->throttled_list);
+#ifdef CONFIG_GPFS_BANDWIDTH
+	cfs_rq->active_q = &cfs_rq->state_q[0];
+	cfs_rq->thrott_q = &cfs_rq->state_q[1];
+	INIT_LIST_HEAD(cfs_rq->active_q);
+	INIT_LIST_HEAD(cfs_rq->thrott_q);
+#endif
 }
 
 void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
@@ -4314,6 +5771,190 @@ static inline void hrtick_update(struct rq *rq)
 }
 #endif
 
+#ifdef CONFIG_GPFS
+#if DEBUG_LAGGED > 0
+static inline void
+__debug_update_eff_load(struct task_struct *p, unsigned long old, unsigned long new) {
+	__debug_gather(2,
+					rq_of(cfs_rq_of(&p->se)),
+					p,
+					old,
+					new,
+					p->se.on_rq,
+					0);
+/*	if (p->pid != 357)
+		return;
+
+	printk(KERN_ERR "[update_eff_load] cpu: %2d pid: %5d comm: %20s old: %5ld new: %ld on_rq: %d\n",
+				rq_of(cfs_rq_of(&p->se))->cpu, p->pid, p->comm, old, new, p->se.on_rq);*/
+}
+#else
+#define __debug_update_eff_load(...) do{}while(0)
+#endif
+
+#ifdef CONFIG_GPFS_VERBOSE
+static void
+__update_eff_load_errmsg(struct sched_entity *task_se, struct sched_entity *se)
+{
+	static unsigned long num_printk = 0;
+	struct task_struct *p;
+
+	num_printk++;
+
+	if (num_printk > 1000 && num_printk % 1000 != 0)
+		return;
+
+	p = task_of(task_se);
+	gpfs_msg("parent_effective_weight is uninitialized!" 
+		   " pid: %d comm: %s se->depth: %d group(id: %d level: %d)"
+		   " parent_group(id: %d level: %d) se->eff_weight: %ld se->weight: %ld parent->weight: %ld\n",
+			p->pid, p->comm, task_se->depth,
+			(se->my_q && se->my_q->tg && se->my_q->tg->css.cgroup)
+					? se->my_q->tg->css.cgroup->id : -1, 
+			(se->my_q && se->my_q->tg && se->my_q->tg->css.cgroup)
+					? se->my_q->tg->css.cgroup->level : -1,
+			(se->parent->my_q && se->parent->my_q->tg && se->parent->my_q->tg->css.cgroup)
+					? se->parent->my_q->tg->css.cgroup->id : -1,  
+			(se->parent->my_q && se->parent->my_q->tg && se->parent->my_q->tg->css.cgroup)
+					? se->parent->my_q->tg->css.cgroup->level : -1,
+			se->eff_load.weight, se->load.weight, se->parent->load.weight
+			);
+}
+#else
+#define __update_eff_load_errmsg(a, b) do{}while(0)
+#endif /* CONFIG_GPFS_VERBOSE */
+
+#ifdef CONFIG_GPFS_AMP
+static inline unsigned long
+calc_lagged_weight(struct sched_entity *se) {
+	unsigned long base, lw;
+	int type;
+	int rq_type = rq_of(cfs_rq_of(se))->cpu_type;
+	
+	base = se->eff_weight_real * se->avg.util_avg 
+				<< CONFIG_GPFS_LAGGED_WEIGHT_ADDED_BITS;
+
+	for_each_type(type) {
+		lw = base / se_effi(se, type);
+		se->__lagged_weight[type] = lw > 0 ? lw : 1;
+	}
+	
+	return se->__lagged_weight[rq_type];
+}
+#else /* !CONFIG_GPFS_AMP */
+#ifdef CONFIG_GPFS_CONSIDER_UTIL
+static inline unsigned long
+calc_lagged_weight(struct sched_entity *se) {
+	unsigned long eff_weight_real = se->eff_weight_real;
+	unsigned long util_avg = se->avg.util_avg;
+	util_avg = (util_avg + ((1 << (SCHED_LOAD_SHIFT - CONFIG_GPFS_LAGGED_WEIGHT_ADDED_BITS)) - 1))
+					>> (SCHED_LOAD_SHIFT - CONFIG_GPFS_LAGGED_WEIGHT_ADDED_BITS);
+	if (likely(eff_weight_real && util_avg))
+		return eff_weight_real * util_avg;
+	else if (eff_weight_real)
+		return 1;
+	else
+		return 0;
+}
+#else /* !CONFIG_GPFS_CONSIDER_UTIL */
+static inline unsigned long
+calc_lagged_weight(struct sched_eneity *se) {
+	return se->eff_weight_real;
+}
+#endif /* !CONFIG_GPFS_CONSIDER_UTIL */
+#endif /* !CONFIG_GPFS_AMP */
+
+static inline int update_lagged_weight(struct sched_entity *pse) {
+	unsigned long lagged_weight = calc_lagged_weight(pse);
+
+	BUG_ON(!entity_is_task(pse));
+	__debug_update_eff_load(task_of(pse), pse->lagged_weight, lagged_weight);
+	
+	if (unlikely(lagged_weight == pse->lagged_weight))
+		return 0; /* not updated */
+		
+	if (pse->on_rq)
+		update_rq_lagged_weight_update(&rq_of(cfs_rq_of(pse))->cfs, pse,
+									pse->lagged_weight, lagged_weight);
+	pse->lagged_weight = lagged_weight;
+	return 1;
+}
+
+/* update effective load from task_se to plast
+ * @task_se: sched_entity of task (&p->se)
+ * @plast: parent of the last sched_entity whose share is updated.
+ *         Mostly, se after for_each_sched_entity(se).
+ *         NULL is allowed to represent the end of the list.
+ */
+static int
+update_eff_load(struct sched_entity *pse, struct sched_entity *plast)
+{
+	struct sched_entity *se = NULL;
+	struct cfs_rq *cfs_rq;
+	unsigned long eff_weight, parent_eff_weight;
+	unsigned long eff_weight_real, parent_eff_weight_real;
+
+	if (unlikely(!pse))
+		return 0;
+
+again:
+	/* get last se. set curr_child from pse to last se */
+	if (pse == plast) { /* when pse was in the leaf and throttled cfs_rq */ 
+		se = pse;
+	} else {
+		for (se = pse; se->parent != plast; se = se->parent) {
+			if (se->parent)
+				se->parent->curr_child = se;
+		}
+	}
+
+	/* set effective weight */
+	for ( ; se; se = se->curr_child) {
+		if (!se->parent) { 
+			/* if no parent, i.e., the first level group, eff_load = load 
+			 * note that we already called update_cfs_shares()
+			 * For tasks belong to root_task_group, eff_load == load too. 
+			 */
+			 if (likely(se->eff_load.weight != se->load.weight))
+				update_load_set(&se->eff_load, se->load.weight);
+			se->eff_weight_real = se->load.weight;
+		} else {
+			/* effective_weight = parent->eff_weight * my_weight / my_cfs_rq->weight */
+			/* parent's effective weight distributes to children based on their weight */
+			cfs_rq = cfs_rq_of(se);
+			parent_eff_weight = se->parent->eff_load.weight;
+			parent_eff_weight_real = se->parent->eff_weight_real;
+			if (unlikely(parent_eff_weight == 0)) {
+				/* uninitialized. reset the whole path.         */
+				/* I think this is not possible, but, I fear... */
+				__update_eff_load_errmsg(pse, se); /* show error message */
+				plast = NULL;
+				goto again;
+			}
+			eff_weight = parent_eff_weight * se->load.weight;
+			eff_weight_real = parent_eff_weight_real * se->load.weight;
+			if (cfs_rq->load.weight) {
+				eff_weight /= cfs_rq->load.weight;
+				eff_weight_real /= cfs_rq->load.weight;
+			}
+
+			if (eff_weight < MIN_SHARES)
+				eff_weight = MIN_SHARES;
+			if (eff_weight > parent_eff_weight)
+				eff_weight = parent_eff_weight;
+
+			/* if eff_weight is not changed, don't reset the inv_eff_weight. */
+			if (likely(eff_weight != se->eff_load.weight))
+				update_load_set(&se->eff_load, eff_weight);
+			se->eff_weight_real = eff_weight_real;
+		}
+	}
+
+	/* update lagged_weight */
+	return update_lagged_weight(pse);
+}
+#endif /* CONFIG_GPFS */
+
 /*
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
@@ -4324,6 +5965,17 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
+
+#ifdef CONFIG_GPFS
+	if (flags & ENQUEUE_WAKEUP) {
+		/* tg_load_sum should be updated before calling 
+		   update_cfs_shares() or enqueue_entity(). */
+		update_tg_load_sum(se, p->sched_task_group, 0, se->load.weight, TG_LOAD_SUM_WAKEUP);
+	}
+	
+	if (se->sleep_start) /* slept tasks or throttled tasks */
+		gpfs_enqueue_sleeper(rq, se);
+#endif
 
 	for_each_sched_entity(se) {
 		if (se->on_rq)
@@ -4358,6 +6010,12 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (!se)
 		add_nr_running(rq, 1);
 
+#ifdef CONFIG_GPFS
+	update_rq_lagged_weight_enqueue(&rq->cfs, &p->se, 0, p->se.lagged_weight);
+	update_eff_load(&p->se, se);
+	update_lagged_enqueue(&p->se, &rq->cfs);
+#endif
+
 	hrtick_update(rq);
 }
 
@@ -4373,6 +6031,21 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 	int task_sleep = flags & DEQUEUE_SLEEP;
+
+#ifdef CONFIG_GPFS
+	/* tg_load_sum should be updated before calling 
+		update_cfs_shares() or enqueue_entity(). */
+	if (task_sleep)
+		update_tg_load_sum(se, p->sched_task_group, se->load.weight, 0, TG_LOAD_SUM_SLEEP);
+	
+	/* if p is a current task, p->se.lagged was refreshed at update_curr().
+	 * Otherwise, p->se.lagged may have wrong value when p->se.lagged_target != cfs_rq->target_vruntime.
+	 * Thus, we should refresh the value here, and update_lagged_dequeue() removes the exact value
+	 * from cfs_rq->lagged.
+	 */
+	if (p != rq->curr)
+		update_lagged(&p->se, &rq->cfs);
+#endif
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
@@ -4417,6 +6090,16 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	if (!se)
 		sub_nr_running(rq, 1);
+
+#ifdef CONFIG_GPFS
+	/* this should be after dequeue */
+	if (task_sleep)
+		gpfs_dequeue_sleeper(rq, &p->se);
+
+	update_rq_lagged_weight_dequeue(&rq->cfs, &p->se, p->se.lagged_weight, 0);
+	update_eff_load(&p->se, se);
+	update_lagged_dequeue(&p->se, &rq->cfs);
+#endif
 
 	hrtick_update(rq);
 }
@@ -4726,6 +6409,7 @@ static void record_wakee(struct task_struct *p)
 
 static void task_waking_fair(struct task_struct *p)
 {
+#ifndef CONFIG_GPFS /* for GPFS, do not normalize vruntime base on min_vruntime */
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	u64 min_vruntime;
@@ -4743,9 +6427,11 @@ static void task_waking_fair(struct task_struct *p)
 #endif
 
 	se->vruntime -= min_vruntime;
+#endif /* !GPFS */
 	record_wakee(p);
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /*
  * effective_load() calculates the load change as seen from the root_task_group
@@ -4860,6 +6546,7 @@ static long effective_load(struct task_group *tg, int cpu, long wl, long wg)
 }
 
 #endif
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * Detect M:N waker/wakee relationships via a switching-frequency heuristic.
@@ -4886,6 +6573,7 @@ static int wake_wide(struct task_struct *p)
 	return 1;
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 static int wake_affine(struct sched_domain *sd, struct task_struct *p, int sync)
 {
 	s64 this_load, load;
@@ -5058,6 +6746,7 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 
 	return shallowest_idle_cpu != -1 ? shallowest_idle_cpu : least_loaded_cpu;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * Try and locate an idle CPU in the sched_domain.
@@ -5093,6 +6782,9 @@ static int select_idle_sibling(struct task_struct *p, int target)
 	 * idle.
 	 */
 	sd = rcu_dereference(per_cpu(sd_llc, target));
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+	target = -1;
+#endif
 	for_each_lower_domain(sd) {
 		sg = sd->groups;
 		do {
@@ -5102,8 +6794,13 @@ static int select_idle_sibling(struct task_struct *p, int target)
 
 			/* Ensure the entire group is idle */
 			for_each_cpu(i, sched_group_cpus(sg)) {
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 				if (i == target || !idle_cpu(i))
 					goto next;
+#else
+				if (!idle_cpu(i))
+					goto next;
+#endif
 			}
 
 			/*
@@ -5155,6 +6852,264 @@ static int cpu_util(int cpu)
 	return (util >= capacity) ? capacity : util;
 }
 
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+/* TODO: this implementation assumes that A and B have same span_weight. plz fix this. */
+/* if group A is more idle than group B, return 1. Otherwise, return 0 */
+static inline int who_is_idle_group(s64 lagged_a, int idle_a, s64 lagged_b, int idle_b) {
+	if (idle_a > idle_b)
+		return 1;
+	else if (idle_a < idle_b)
+		return 0;
+	else if (lagged_a > lagged_b)
+		return 0;
+	else
+		return 1;
+}
+
+static struct sched_group *
+find_fastest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu) {
+	struct sched_group *fastest = NULL, *group = sd->groups;
+	/* if local group has no allowed cpu, this_lagged should not be selected. */
+	s64 min_lagged = LLONG_MAX, this_lagged = LLONG_MAX;
+	int min_idle = -1, this_idle = -1;
+	u64 target = atomic64_read(&sd->vruntime->target);
+
+	do {
+		s64 lagged;
+		s64 lagged_sum;
+		int local_group;
+		int i;
+		int num_idle;
+
+		/* Skip over this group if it has no CPUs allowed */
+		if (!cpumask_intersects(sched_group_cpus(group),
+					tsk_cpus_allowed(p)))
+			continue;
+
+		local_group = cpumask_test_cpu(this_cpu,
+							sched_group_cpus(group));
+
+		lagged_sum = 0;
+		num_idle = 0;
+
+		for_each_cpu(i, sched_group_cpus(group)) {
+			if (idle_cpu(i)) {
+#ifdef CONFIG_GPFS_AMP
+				/* for AMP, idleness is determined with default efficiency */
+				num_idle += DEFAULT_EFFICIENCY[cpu_rq(i)->cpu_type];
+#else
+				num_idle++;
+#endif
+			} else {
+				lagged = cpu_lagged(i, target) / group->group_weight;
+				lagged_sum += lagged;
+			}
+		}
+
+
+		if (local_group) {
+			this_lagged = lagged_sum;
+			this_idle = num_idle;
+		} else if (who_is_idle_group(lagged_sum, num_idle, min_lagged, min_idle)) {
+			min_lagged = lagged_sum;
+			min_idle = num_idle;
+			fastest = group;
+		}
+	} while (group = group->next, group != sd->groups);
+
+	if (!fastest || who_is_idle_group(this_lagged, this_idle, min_lagged, min_idle))
+		return NULL;
+	return fastest;
+}
+
+static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group, 
+											struct task_struct *p, int this_cpu)
+{
+	s64 lagged, min_lagged = LLONG_MAX;
+	u64 target;
+	unsigned int min_exit_latency = UINT_MAX;
+	u64 latest_idle_timestamp = 0;
+	int fastest_cpu = this_cpu;
+	int shallowest_idle_cpu = -1;
+#ifdef CONFIG_GPFS_AMP
+	int shallowest_idle_type = -1;
+#endif
+	int i;
+
+	target = atomic64_read(&sd->vruntime->target);
+
+	/* Traverse only the allowed CPUs */
+	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) 
+		if (idle_cpu(i)) {
+			struct rq *rq = cpu_rq(i);
+			struct cpuidle_state *idle = idle_get_state(rq);
+#ifdef CONFIG_GPFS_AMP
+			if (rq->cpu_type < shallowest_idle_type) {
+				/* rq->cpu_type >= 0 
+				 * shallowest_idle_type >= 0 only if shallowest_idle_cpu >= 0
+				 * => This condition is enough to filter slower idle cpus */
+				continue;
+			} else if (rq->cpu_type > shallowest_idle_type) {
+				if (idle)
+					min_exit_latency = idle->exit_latency;
+				latest_idle_timestamp = rq->idle_stamp;
+				shallowest_idle_cpu = i;
+				shallowest_idle_type = rq->cpu_type;
+				continue;
+			}
+#endif /* CONFIG_GPFS_AMP */
+			if (idle && idle->exit_latency < min_exit_latency) {
+				/*
+				 * We give priority to a CPU whose idle state
+				 * has the smallest exit latency irrespective
+				 * of any idle timestamp.
+				 */
+				min_exit_latency = idle->exit_latency;
+				latest_idle_timestamp = rq->idle_stamp;
+				shallowest_idle_cpu = i;
+#ifdef CONFIG_GPFS_AMP
+				shallowest_idle_type = rq->cpu_type;
+#endif /* CONFIG_GPFS_AMP */
+			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
+					   rq->idle_stamp > latest_idle_timestamp) {
+				/*
+				 * If equal or no active idle state, then
+				 * the most recently idled CPU might have
+				 * a warmer cache.
+				 */
+				latest_idle_timestamp = rq->idle_stamp;
+				shallowest_idle_cpu = i;
+#ifdef CONFIG_GPFS_AMP
+				shallowest_idle_type = rq->cpu_type;
+#endif /* CONFIG_GPFS_AMP */
+			}
+		} else if (shallowest_idle_cpu == -1) {
+			lagged = cpu_lagged(i, target);
+			/* TODO: the second condition may not useful unless considering tolerance. */
+			if (lagged < min_lagged || (lagged == min_lagged && i == this_cpu)) {
+				min_lagged = lagged;
+				fastest_cpu = i;
+			}
+		}
+
+	return shallowest_idle_cpu != -1 ? shallowest_idle_cpu : fastest_cpu;
+}
+
+/*
+ * select_task_rq_fair: Select target runqueue for the waking task in domains
+ * that have the 'sd_flag' flag set. In practice, this is SD_BALANCE_WAKE,
+ * SD_BALANCE_FORK, or SD_BALANCE_EXEC.
+ *
+ * Balances load by selecting the idlest cpu in the idlest group, or under
+ * certain conditions an idle sibling cpu if the domain has SD_WAKE_AFFINE set.
+ *
+ * Returns the target cpu number.
+ *
+ * preempt must be disabled.
+ */
+static int
+select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_flags)
+{
+	struct sched_domain *tmp, *sd = NULL;
+	int cpu = smp_processor_id();
+	int new_cpu = prev_cpu;
+	int want_affine = 0;
+	int sync = wake_flags & WF_SYNC;
+	
+	if (sd_flag & SD_BALANCE_WAKE)
+		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
+
+	rcu_read_lock();
+	if (want_affine) {
+		if (prev_cpu != cpu && cpus_share_cache(cpu, prev_cpu) && idle_cpu(prev_cpu)) {
+			new_cpu = prev_cpu;
+			goto out;
+		}
+
+		if (sync && cpu_rq(cpu)->cfs.h_nr_running == 1) {
+			new_cpu = cpu;
+			goto out;
+		}
+
+		if (cpus_share_cache(prev_cpu, cpu)) {
+			sd = rcu_dereference(per_cpu(sd_llc, cpu));
+			new_cpu = cpu;
+		} else {
+			sd = rcu_dereference(per_cpu(sd_llc, prev_cpu));
+			cpu = prev_cpu;
+		}
+
+	}
+	
+	if (!sd) { /* Basically, start from the highest domain */
+		for_each_domain(cpu, tmp)
+			sd = tmp;
+		new_cpu = cpu;
+	}
+
+	while (sd) {
+		struct sched_group *group;
+		int weight;
+	
+		/* if (!(sd->flags & sd_flag)) {
+			sd = sd->child;
+			continue;
+		} */
+
+		group = find_fastest_group(sd, p, cpu);
+		if (!group) {
+			if (!sd->child && sd->span_weight > 1) { 
+				/* the lowest domain. pick up a rq */
+				/* Note that sd->groups is the local group */
+				new_cpu = find_fastest_cpu(sd, sd->groups, p, cpu);
+				break;
+			}
+			sd = sd->child;
+			continue;
+		}
+
+		new_cpu = find_fastest_cpu(sd, group, p, cpu);
+		if (new_cpu == cpu) {
+			/* Now try balancing at a lower domain level of cpu */
+			sd = sd->child;
+			continue;
+		}
+
+		cpu = new_cpu;
+		weight = sd->span_weight;
+		sd = NULL;
+		for_each_domain(cpu, tmp) {
+			if (weight <= tmp->span_weight)
+				break;
+			if (tmp->flags & sd_flag)
+				sd = tmp;
+		}
+		/* while loop will break here if sd == NULL */
+	}
+
+#ifdef CONFIG_GPFS_STATS
+	if (new_cpu == -1)
+		gpfs_stat_inc(cpu_rq(cpu), select_fail);
+	else {
+		if (idle_cpu(new_cpu))
+			gpfs_stat_inc(cpu_rq(cpu), select_idle);
+		else
+			gpfs_stat_inc(cpu_rq(cpu), select_busy);
+	}
+#endif
+out:
+	rcu_read_unlock();
+	
+	if (new_cpu == -1)
+		new_cpu = smp_processor_id();
+
+	if (!cpumask_test_cpu(new_cpu, tsk_cpus_allowed(p)))
+		new_cpu = cpumask_any(tsk_cpus_allowed(p));
+
+
+	return new_cpu;
+}
+#else /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
  * that have the 'sd_flag' flag set. In practice, this is SD_BALANCE_WAKE,
@@ -5207,7 +7162,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	}
 
 	if (!sd) {
-		if (sd_flag & SD_BALANCE_WAKE) /* XXX always ? */
+		if (sd_flag & SD_BALANCE_WAKE)
 			new_cpu = select_idle_sibling(p, new_cpu);
 
 	} else while (sd) {
@@ -5248,6 +7203,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 	return new_cpu;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * Called immediately before a task is migrated to a new cpu; task_cpu(p) and
@@ -5446,6 +7402,11 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev)
 	struct task_struct *p;
 	int new_tasks;
 
+#ifdef CONFIG_GPFS
+	if (vruntime_passed(real_min_vruntime(cfs_rq), cfs_rq->target_vruntime))
+		goto idle;
+#endif
+
 again:
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	if (!cfs_rq->nr_running)
@@ -5453,6 +7414,10 @@ again:
 
 	if (prev->sched_class != &fair_sched_class)
 		goto simple;
+
+	if (cfs_rq->was_idle == CFS_RQ_WAS_IDLE)
+		gpfs_msg("[%s] I was wrong. cfs_rq->was_idle == WAS_IDLE, but we won't detect it. (file: %s line: %d)\n",
+			__func__, __FILE__, __LINE__);
 
 	/*
 	 * Because of the set_next_buddy() in dequeue_task_fair() it is rather
@@ -5517,6 +7482,10 @@ again:
 
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
+#ifdef CONFIG_GPFS_AMP
+		put_prev_effi(prev);
+		set_curr_effi(p);
+#endif
 	}
 
 	if (hrtick_enabled(rq))
@@ -5532,6 +7501,17 @@ simple:
 
 	put_prev_task(rq, prev);
 
+#ifdef CONFIG_GPFS
+	/* Here is good place to detect idle-to-busy transition.
+	 * Even with FAIR_GROUP_SCHED, this function returns above
+	 * only if (prev->sched_class == &fair_sched_class).
+	 * That is, next will not be the first fair-class task
+	 * after idle mode.
+	 */
+	if (cfs_rq->was_idle == CFS_RQ_WAS_IDLE)
+		transit_idle_to_busy(rq);
+#endif
+
 	do {
 		se = pick_next_entity(cfs_rq, NULL);
 		set_next_entity(cfs_rq, se);
@@ -5539,6 +7519,10 @@ simple:
 	} while (cfs_rq);
 
 	p = task_of(se);
+#ifdef CONFIG_GPFS_AMP
+	/* put_prev_effi() was done at put_prev_task() above */
+	set_curr_effi(p);
+#endif
 
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
@@ -5553,7 +7537,24 @@ idle:
 	 * re-start the picking loop.
 	 */
 	lockdep_unpin_lock(&rq->lock);
+#ifdef CONFIG_GPFS
+	new_tasks = target_vruntime_balance(rq, !cfs_rq->nr_running ? CPU_NEWLY_IDLE : CPU_NOT_IDLE);
+	/* The pulled tasks are likey to have low vruntime.
+	 * So, just follow the original implementation... */
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+	/* if new_tasks > 0, it's okay.
+	   if new_tasks < 0, goto retry at the below. */
+	if (new_tasks == 0 && !cfs_rq->nr_running) {
+		new_tasks = idle_balance(rq);
+#ifdef CONFIG_GPFS_STATS
+		if (new_tasks > 0)
+			gpfs_stat_add(rq, nr_idle_balance_works, new_tasks);
+#endif
+	}
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
+#else /* !CONFIG_GPFS */
 	new_tasks = idle_balance(rq);
+#endif
 	lockdep_pin_lock(&rq->lock);
 	/*
 	 * Because idle_balance() releases (and re-acquires) rq->lock, it is
@@ -5563,7 +7564,7 @@ idle:
 	if (new_tasks < 0)
 		return RETRY_TASK;
 
-	if (new_tasks > 0)
+	if (cfs_rq->nr_running)
 		goto again;
 
 	return NULL;
@@ -5581,6 +7582,9 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 		cfs_rq = cfs_rq_of(se);
 		put_prev_entity(cfs_rq, se);
 	}
+#ifdef CONFIG_GPFS_AMP
+	put_prev_effi(prev);
+#endif
 }
 
 /*
@@ -5781,6 +7785,16 @@ struct lb_env {
 
 	unsigned int		flags;
 
+#ifdef CONFIG_GPFS
+	u64 target;
+	u64 interval;
+	u64 tolerance;
+	s64 lagged_diff;
+#endif
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+	int slower_src; /* src_rq->cpu_type < dst_rq->cpu_type */
+#endif
+
 	unsigned int		loop;
 	unsigned int		loop_break;
 	unsigned int		loop_max;
@@ -5789,6 +7803,7 @@ struct lb_env {
 	struct list_head	tasks;
 };
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * Is this task likely cache-hot:
  */
@@ -5957,6 +7972,7 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	schedstat_inc(p, se.statistics.nr_failed_migrations_hot);
 	return 0;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * detach_task() -- detach the task for the migration specified in env
@@ -5970,6 +7986,7 @@ static void detach_task(struct task_struct *p, struct lb_env *env)
 	set_task_cpu(p, env->dst_cpu);
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * detach_one_task() -- tries to dequeue exactly one task from env->src_rq, as
  * part of active balancing operations within "domain".
@@ -5999,9 +8016,11 @@ static struct task_struct *detach_one_task(struct lb_env *env)
 	}
 	return NULL;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 static const unsigned int sched_nr_migrate_break = 32;
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * detach_tasks() -- tries to detach up to imbalance weighted load from
  * busiest_rq, as part of a balancing operation within domain "sd".
@@ -6090,6 +8109,7 @@ next:
 
 	return detached;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * attach_task() -- attach the task detached by detach_task() to its new rq.
@@ -6750,6 +8770,7 @@ next_group:
 
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /**
  * check_asym_packing - Check to see if the group is packed into the
  *			sched doman.
@@ -6793,6 +8814,7 @@ static int check_asym_packing(struct lb_env *env, struct sd_lb_stats *sds)
 
 	return 1;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /**
  * fix_small_imbalance - Calculate the minor imbalance that exists
@@ -6939,6 +8961,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 
 /******* find_busiest_group() helpers end here *********************/
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /**
  * find_busiest_group - Returns the busiest group within the sched_domain
  * if there is an imbalance. If there isn't an imbalance, and
@@ -7113,6 +9136,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 
 	return busiest;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * Max backoff if we encounter pinned tasks. Pretty arbitrary value, but
@@ -7123,6 +9147,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 /* Working cpumask for load_balance and load_balance_newidle. */
 DEFINE_PER_CPU(cpumask_var_t, load_balance_mask);
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 static int need_active_balance(struct lb_env *env)
 {
 	struct sched_domain *sd = env->sd;
@@ -7456,6 +9481,7 @@ out_one_pinned:
 out:
 	return ld_moved;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 static inline unsigned long
 get_sd_balance_interval(struct sched_domain *sd, int cpu_busy)
@@ -7484,6 +9510,7 @@ update_next_balance(struct sched_domain *sd, int cpu_busy, unsigned long *next_b
 		*next_balance = next;
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * idle_balance is called by schedule() if this_cpu is about to become
  * idle. Attempts to pull tasks from other CPUs.
@@ -7581,7 +9608,1721 @@ out:
 
 	return pulled_task;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
+#ifdef CONFIG_GPFS
+#ifdef CONFIG_GPFS_MIN_TARGET
+void set_min_vruntime_idle_to_busy(struct rq *rq)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	cfs_rq->min_vruntime = get_min_target(rq);
+#ifndef CONFIG_64BIT
+	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+#endif
+	return;
+}
+#else /* !CONFIG_GPFS_MIN_TARGET */
+/* rcu_read_lock must be held */
+/* Note that @sd is the lowest busy domain, or the highest domain */ 
+void set_min_vruntime_idle_to_busy(struct rq *rq)
+{
+	int this_cpu = rq->cpu;
+	struct sched_domain *sd, *highest_sd = NULL;
+	struct sched_domain *sd_lowest_busy = NULL;
+	struct sd_vruntime *sdv, *curr, *largest_curr;
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	int updated_by;
+	u64 min_vruntime, idle_vruntime, busy_vruntime = (u64)(-(1LL << 20));
+	u64 curr_target, largest_target;
+	u64 now = rq_clock(rq);
+	s64 delta;
+	int all_domains_are_idle = 0; /* for debug message */
+
+	if (unlikely(rq->sd_vruntime == NULL)) /* while initialization */
+		return;
+
+	/* for very short sleep, do not update min_vruntime. */
+	/* This is also useful for initialization. */
+	delta = now - cfs_rq->idle_start;
+	
+	if (delta < (rq->cfs.target_interval / 2))
+		return;
+
+	for_each_domain(this_cpu, sd) {
+		highest_sd = sd;
+		if (!sd_lowest_busy
+				&& atomic_read(&sd->vruntime->nr_busy) > 0)
+			sd_lowest_busy = sd;
+	}
+	if (!sd_lowest_busy)
+		sd_lowest_busy = highest_sd;
+	
+	/* initialization phase was filtered by rq->sd_vruntime == NULL above. */
+	BUG_ON(!highest_sd); 
+	
+retry:
+	min_vruntime = cfs_rq->min_vruntime;
+	sdv = sd_lowest_busy->vruntime;
+
+	/* get idle_vruntime */
+	idle_vruntime = (u64) atomic64_read(&highest_sd->vruntime->largest_idle_min_vruntime);
+
+	/* if all domains are idle */
+	if (atomic_read(&highest_sd->vruntime->nr_busy) == 0) {
+		all_domains_are_idle = 1;
+		goto out;
+	}
+
+	/* get busy_vruntime */
+	updated_by = -1; /* sd_lowest_busy->vruntime->child == NULL */
+	while (sdv->child) {
+		updated_by = atomic_read(&sdv->updated_by);
+		if (updated_by < 0)
+			updated_by = this_cpu;
+		
+		curr = sdv->child;
+		curr_target = atomic64_read(&curr->target);
+		largest_curr = NULL;
+		largest_target = (u64)(-(1LL << 20));
+		do {
+			if (!atomic_read(&curr->nr_busy))
+				goto next;
+			
+			if (vruntime_passed_ne(curr_target, largest_target)) {
+				largest_curr = curr;
+				largest_target = curr_target;
+			} else if (curr_target == largest_target
+						&& cpumask_test_cpu(updated_by, sd_vruntime_span(curr))) {
+				largest_curr = curr;
+			}
+next:
+			curr = curr->next;
+		} while (curr != sdv->child);
+
+		if (!largest_curr) {
+			/* racing occurred! The domain is actually idle */
+			/* Go to the top level and retry */
+			sd_lowest_busy = highest_sd;
+			goto retry;
+		}
+		sdv = largest_curr;
+	}
+
+	if (updated_by < 0) /* sd_lowest_busy->vruntime->child == NULL */
+		updated_by = atomic_read(&sdv->updated_by);
+	else if (updated_by == this_cpu)
+		updated_by = -1;
+
+	/* sdv have the highest target among sibling domains.
+	 * Thus, min_vruntime of @updated_by is an appropriate candiate,
+	 * and the maxminum min_vruntime of all cpus in its span is also a candidate.
+	 */
+	if (updated_by >= 0 && cpu_rq(updated_by)->cfs.lagged < 0) {
+		busy_vruntime = atomic64_read(&sdv->target);
+	} else {
+		busy_vruntime = atomic64_read(&sdv->target) - (sdv->interval / 2);
+	}
+
+out:
+#ifdef CONFIG_GPFS_VERBOSE
+	if (vruntime_passed_ne(cfs_rq->min_vruntime, max_vruntime(idle_vruntime, busy_vruntime)))
+		gpfs_msg("[%s] min_vruntime_update_error_prone %s"
+				 " cpu: %d level: %d min_vruntime: %lld idle_vruntime: %lld busy_vruntime: %lld\n",
+				 __func__,
+				 all_domains_are_idle ? "all_domains_are_idle" : "some_domains_are_busy",
+				 this_cpu,
+				 sd_lowest_busy ? sd_lowest_busy->level : -1, 
+				 min_vruntime, idle_vruntime, busy_vruntime);
+#endif
+
+	min_vruntime = max_vruntime(min_vruntime, idle_vruntime);
+	min_vruntime = max_vruntime(min_vruntime, busy_vruntime);
+	cfs_rq->min_vruntime = min_vruntime;
+#ifndef CONFIG_64BIT
+	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+#endif
+	return;
+}
+#endif /* !CONFIG_GPFS_MIN_TARGET */
+	
+/* rq->lock is held */
+void transit_idle_to_busy(struct rq *rq) 
+{
+	int this_cpu = rq->cpu;
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_domain *sd;
+	struct sd_vruntime *sdv;
+
+	rcu_read_lock();
+
+	/* set min_vruntime before increment nr_busy */
+	set_min_vruntime_idle_to_busy(rq);
+
+	/* We increment nr_busy at higher to lower level.
+	 * For lockless read, it is better to stay busy more.
+	 * Seeing busy state, but actually idle is okay,
+	 * but the opposition is problematic.
+	 */
+	for_each_domain(this_cpu, sd)
+		if (!sd->parent)
+			break;
+
+	for_each_lower_domain(sd) {
+		sdv = sd->vruntime;
+		atomic_inc(&sdv->nr_busy);
+	}
+	rcu_read_unlock();
+
+	cfs_rq->was_idle = CFS_RQ_WAS_BUSY;
+}
+
+/* rq->lock is held */
+void transit_busy_to_idle(struct rq *rq) {
+	int this_cpu = rq->cpu;
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_domain *sd;
+	struct sd_vruntime *sdv;
+	int check_idle_min_vruntime = 5; /* max retry */
+	u64 min_vruntime = rq->cfs.min_vruntime;
+	u64 largest_vruntime; /* to atomically update largest_idle_min_vruntime */
+
+	if (unlikely(cfs_rq->was_idle != CFS_RQ_WAS_BUSY)) {
+		/* cfs_rq->was_idle can be
+		 * 1) CFS_RQ_UNINITIALIZED while booting up
+		 * 2) CFS_RQ_WAS_IDLE right after the initialization.
+		 *    (All domains are initialized as idle, but actually this was busy.
+		 */
+		return;
+	}
+
+	rcu_read_lock();
+	for_each_domain(this_cpu, sd) {
+		sdv = sd->vruntime;
+
+		/* check updated_by */
+		if (atomic_read(&sdv->updated_by) == this_cpu) {
+			atomic_cmpxchg(&sdv->updated_by, this_cpu, -1);
+		}
+
+		/* check largest_idle_min_vruntime to the domain having larger value. */
+		if (check_idle_min_vruntime) {
+			largest_vruntime = (u64) atomic64_read(&sdv->largest_idle_min_vruntime);
+
+			if (vruntime_passed_ne(min_vruntime, largest_vruntime)) {
+				largest_vruntime = atomic64_xchg(&sdv->largest_idle_min_vruntime, min_vruntime);
+
+				if (vruntime_passed_ne(largest_vruntime, min_vruntime)) {
+					/* actually, min_vruntime > largest_vruntime */
+					check_idle_min_vruntime = 0;
+					do {
+						min_vruntime = largest_vruntime;
+						largest_vruntime = atomic64_xchg(&sdv->largest_idle_min_vruntime, min_vruntime);
+						gpfs_stat_inc(rq, largest_idle_min_vruntime_racing);
+					} while (vruntime_passed_ne(largest_vruntime, min_vruntime));
+				}
+			} else /* min_vruntime > largest_vruntime */
+				check_idle_min_vruntime = 0;
+		}
+
+		/* We decrement nr_busy at lower to higher level.
+		 * For lockless read, it is better to stay busy more.
+		 * Seeing busy state, but actually idle is okay,
+		 * but the opposition is problematic.
+		 */
+		atomic_dec(&sdv->nr_busy);
+	}
+#ifdef CONFIG_GPFS_MIN_TARGET
+	delete_min_target_rq(cfs_rq);
+#endif
+	rcu_read_unlock();
+
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+	if (unlikely(rq->infeasible_weight))
+		rq->infeasible_weight = 0;
+#endif
+	cfs_rq->was_idle = CFS_RQ_WAS_IDLE;
+	cfs_rq->idle_start = rq_clock(rq);
+}
+
+/* TODO: this implementation assumes that A and B have same span_weight. plz fix this. */
+/* if group A is busier than group B, return 1. Otherwise, return 0 */
+static inline int who_is_busy_group(s64 lagged_a, int busy_a, s64 lagged_b, int busy_b) {
+	if (busy_a > busy_b)
+		return 1;
+	else if (busy_a < busy_b)
+		return 0;
+	else if (lagged_a > lagged_b)
+		return 1;
+	else
+		return 0;
+}
+
+static struct sched_group *
+find_most_lagged_group(struct lb_env *env) {
+	struct sched_domain *sd = env->sd;
+	struct sched_group *busiest = NULL, *group = sd->groups;
+	s64 max_lagged = LLONG_MIN, this_lagged = LLONG_MIN;
+	int max_busy = -1, this_busy = 0;
+
+	do {
+		s64 lagged;
+		s64 lagged_sum;
+		int local_group;
+		int i;
+		int num_busy;
+		unsigned int sum_nr_running;
+		struct rq *rq;
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+		int min_cpu_type = INT_MAX;
+#endif
+
+		local_group = cpumask_test_cpu(env->dst_cpu,
+							sched_group_cpus(group));
+
+		lagged_sum = 0;
+		num_busy = 0;
+		sum_nr_running = 0;
+
+		for_each_cpu(i, sched_group_cpus(group)) {
+			if (idle_cpu(i))
+				continue;
+			/* to prevent overflow, divide the lagged value with group_weight.
+			   it's like an average value. */
+			rq = cpu_rq(i);
+			lagged = rq_lagged(rq, env->target) / group->group_weight;
+			lagged_sum += lagged;
+			num_busy++;
+			sum_nr_running += rq->cfs.h_nr_running;
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+			if (rq->cpu_type < min_cpu_type)
+				min_cpu_type = rq->cpu_type;
+#endif
+		}
+
+		if (local_group) {
+			this_lagged = lagged_sum;
+			this_busy = num_busy;
+			continue;
+		}
+// TODO: include cpu_type < dst_rq->cpu_type => ignore sum_nr_running condition
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+		if (min_cpu_type >= env->dst_rq->cpu_type 
+				&& sum_nr_running < group->group_weight)
+			continue;
+#else /* !CONFIG_GPFS_AMP_AGGRESSIVE */
+		if (sum_nr_running < group->group_weight)
+			continue;
+#endif /* !CONFIG_GPFS_AMP_AGGRESSIVE */
+
+#if CONFIG_GPFS_TOLERANCE_PERCENT > 0
+		/* Note that 1) tolerance = 0 for idle destination cpus
+		 *           2) tolerance is time (ns)
+		 *           3) lagged = remaining time (ns) to reach target * eff_weight * cpu_util
+		 *	            but, cpu util remains only CONFIG_GPFS_CONSIDER_UTIL_BITS.
+		 */
+		if (lagged_sum < env->tolerance * (1 << (SCHED_LOAD_SHIFT + CONFIG_GPFS_LAGGED_WEIGHT_ADDED_BITS)))
+			continue;
+#endif
+		
+		if (who_is_busy_group(lagged_sum, num_busy, max_lagged, max_busy)) {
+			max_lagged = lagged_sum;
+			max_busy = num_busy;
+			busiest = group;
+		}
+	} while (group = group->next, group != sd->groups);
+
+	if (!busiest)
+		return NULL;
+	
+	if (env->idle != CPU_NOT_IDLE)
+		return busiest;
+	
+	if (who_is_busy_group(this_lagged, this_busy, max_lagged, max_busy))
+		return NULL;
+
+	return busiest;
+}
+
+static struct rq *find_most_lagged_rq(struct lb_env *env, 
+					struct sched_group *group) 
+{
+	int cpu;
+	s64 this_lagged;
+	s64 lagged, max_lagged;
+	struct rq *rq, *lagged_rq = NULL;
+
+	if (env->idle == CPU_NOT_IDLE) {
+		this_lagged = rq_lagged(env->dst_rq, env->target);
+#if CONFIG_GPFS_TOLERANCE_PERCENT > 0
+		this_lagged += env->tolerance * (1 << (SCHED_LOAD_SHIFT + CONFIG_GPFS_LAGGED_WEIGHT_ADDED_BITS));
+#endif
+	} else {
+		/* for idle or newly idle cases, rq_lagged() = 0.
+		 * But, to pull any tasks, it is required that rq_lagged() = LLONG_MIN */
+		this_lagged = LLONG_MIN;
+	}
+	max_lagged = this_lagged;
+
+	for_each_cpu_and(cpu, sched_group_cpus(group), env->cpus) {
+		gpfs_stat_inc(env->sd, lagged_count[env->idle]);
+		rq = cpu_rq(cpu);
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+		if (rq->cpu_type >= env->dst_rq->cpu_type && rq->nr_running < 2) {
+			gpfs_stat_inc(env->sd, lagged_little_tasks[env->idle]);
+			continue;
+		}
+#else /* !CONFIG_GPFS_AMP_AGGRESSIVE */
+		if (rq->nr_running < 2) {
+			gpfs_stat_inc(env->sd, lagged_little_tasks[env->idle]);
+			continue;
+		}
+#endif /* !CONFIG_GPFS_AMP_AGGRESSIVE */
+
+		if (rq->cfs.h_nr_running == 0) {
+			gpfs_stat_inc(env->sd, lagged_no_cfs_tasks[env->idle]);
+			continue;
+		}
+	
+		lagged = rq_lagged(rq, env->target);
+		if (lagged <= this_lagged) {
+			/* for stats... this is not necessary.
+			 * Note that the initial value of max_lagged = this_lagged */
+			gpfs_stat_inc(env->sd, lagged_pass_soon[env->idle]);
+			continue;
+		}
+
+		if (lagged <= max_lagged) {
+			gpfs_stat_inc(env->sd, lagged_not_min[env->idle]);
+			continue;
+		}
+
+		gpfs_stat_inc(env->sd, lagged_found[env->idle]);
+		lagged_rq = rq;
+		max_lagged = lagged;
+	}
+
+	return lagged_rq;
+}
+
+/*
+ * can_migrate_lagged_task - may task p from runqueue rq be migrated to this_cpu?
+ * Aggressive migration - do not consider data locality.
+ * TODO: aggressive migration ==> preference based migration.
+ */
+static
+int can_migrate_lagged_task(struct task_struct *p, struct lb_env *env)
+{
+	lockdep_assert_held(&env->src_rq->lock);
+
+	/*
+	 * We do not migrate tasks that are:
+	 * 1) throttled_lb_pair, or
+	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
+	 * 3) running (obviously), or
+	 * 4) are cache-hot on their current CPU.
+	 */
+	if (throttled_lb_pair(task_group(p), env->src_cpu, env->dst_cpu))
+		return 0;
+
+	if (!cpumask_test_cpu(env->dst_cpu, tsk_cpus_allowed(p))) {
+		int cpu;
+
+		schedstat_inc(p, se.statistics.nr_failed_migrations_affine);
+
+		env->flags |= LBF_SOME_PINNED;
+
+		/*
+		 * Remember if this task can be migrated to any other cpu in
+		 * our sched_group. We may want to revisit it if we couldn't
+		 * meet load balance goals by pulling other tasks on src_cpu.
+		 *
+		 * Also avoid computing new_dst_cpu if we have already computed
+		 * one in current iteration.
+		 */
+		if (!env->dst_grpmask || (env->flags & LBF_DST_PINNED))
+			return 0;
+
+		/* Prevent to re-select dst_cpu via env's cpus */
+		for_each_cpu_and(cpu, env->dst_grpmask, env->cpus) {
+			if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) {
+				env->flags |= LBF_DST_PINNED;
+				env->new_dst_cpu = cpu;
+				break;
+			}
+		}
+
+		return 0;
+	}
+
+	/* Record that we found at least one task that could run on dst_cpu */
+	env->flags &= ~LBF_ALL_PINNED;
+
+	if (task_running(env->src_rq, p)) {
+		schedstat_inc(p, se.statistics.nr_failed_migrations_running);
+		return 0;
+	}
+
+	return 1;
+}
+
+#ifdef CONFIG_GPFS_AMP
+#define __debug_lagged_diff(...) do{}while(0)
+
+static inline 
+s64 __migration_benefit(s64 src_lagged, s64 dst_lagged, s64 prev_max, u64 target,
+							int src_type, int dst_type, struct sched_entity *se)
+{
+	dst_lagged += task_lagged_type(se, target, dst_type);
+	if (dst_lagged > prev_max)
+		return -1;
+	src_lagged -= task_lagged_type(se, target, src_type);
+	if (src_lagged > prev_max)
+		return -1;
+	if (dst_lagged > src_lagged)
+		return prev_max - dst_lagged;
+	else
+		return prev_max - src_lagged;
+}
+
+static inline
+s64 migration_benefit(struct task_struct *p, struct lb_env *env)
+{
+	s64 src_lagged, dst_lagged, target;
+	target = env->target + env->interval;
+	src_lagged = rq_lagged(env->src_rq, target);
+	dst_lagged = rq_lagged(env->dst_rq, target);
+
+	return __migration_benefit(src_lagged, dst_lagged,
+				src_lagged > dst_lagged ? src_lagged : dst_lagged, target,
+				env->src_rq->cpu_type, env->dst_rq->cpu_type, &p->se);
+}
+
+#ifdef CONFIG_GPFS_RB_LEFTMOST_FIRST
+static struct task_struct *pick_lowest_vruntime_task(struct rq *rq) {
+	struct sched_entity *se;
+	struct cfs_rq *cfs_rq = &rq->cfs;
+
+	if (!cfs_rq->nr_running)
+		return NULL;
+
+	do {
+		se = __pick_first_entity(cfs_rq);
+		/* consider about cfs_rq->curr
+		 * 1) if this function was called from detach_one_lagged_task(),
+		 *    current task is migration/? in stop class
+		 *    Thus, no cfs_rq has curr.
+		 * 2) if this function was called from detach_lagged_tasks(),
+		 *    cfs_rq has curr at some level.
+		 *    But, if it is a task, it will be filtered by can_migrate_lagged_task().
+		 */
+		if (cfs_rq->curr && !entity_is_task(cfs_rq->curr)
+				&& (!se || entity_before(cfs_rq->curr, se)))
+			se = cfs_rq->curr;
+
+		if (!se)
+			return NULL;
+
+		cfs_rq = group_cfs_rq(se);
+	} while (cfs_rq);
+
+	return task_of(se);
+}
+#endif /* CONFIG_GPFS_RB_LEFTMOST_FIRST */
+static struct task_struct *detach_one_lagged_task(struct lb_env *env)
+{
+	struct task_struct *p, *n;
+	int consider = 0, src_type, dst_type;
+	s64 src_lagged, dst_lagged, prev_max, target;
+	
+	target = env->target;
+	src_lagged = rq_lagged(env->src_rq, target);
+	dst_lagged = rq_lagged(env->dst_rq, target);
+	prev_max = src_lagged > dst_lagged ? src_lagged : dst_lagged;
+	src_type = env->src_rq->cpu_type;
+	dst_type = env->dst_rq->cpu_type;
+
+	lockdep_assert_held(&env->src_rq->lock);
+#ifdef CONFIG_GPFS_RB_LEFTMOST_FIRST
+	p = pick_lowest_vruntime_task(env->src_rq);
+	if (p && can_migrate_lagged_task(p, env)
+			&& __migration_benefit(src_lagged, dst_lagged, prev_max,
+									target, src_type, dst_type, &p->se) > 0) {
+		detach_task(p, env);
+		gpfs_stat_inc(env->sd, atb_pushed_under);
+		return p;
+	}
+#endif /* CONFIG_GPFS_RB_LEFTMOST_FIRST */
+
+	list_for_each_entry_safe(p, n, &env->src_rq->cfs_tasks, se.group_node) {
+		if (!can_migrate_lagged_task(p, env))
+			continue;
+		
+		consider++;
+		if (unlikely(consider > sysctl_sched_nr_migrate))
+			break;
+
+		if (__migration_benefit(src_lagged, dst_lagged, prev_max, 
+								target,	src_type, dst_type, &p->se) <= 0)
+			continue;
+		
+		detach_task(p, env);
+		gpfs_stat_inc(env->sd, atb_pushed);
+		return p;
+	}
+		gpfs_stat_inc(env->sd, atb_failed);
+
+	return NULL;
+}
+
+static int detach_lagged_tasks(struct lb_env *env)
+{
+	struct list_head *tasks = &env->src_rq->cfs_tasks;
+	struct task_struct *p;
+	int detached = 0;
+	u64 target;
+	s64 dst_lagged, src_lagged;
+	s64 max_lagged, benefit;
+	int src_type = env->src_rq->cpu_type;
+	int dst_type = env->dst_rq->cpu_type;
+
+	lockdep_assert_held(&env->src_rq->lock);
+
+	gpfs_stat_inc(env->sd, detach_count[env->idle]);
+
+	target = env->target + env->interval;
+	if (env->idle == CPU_NOT_IDLE) {
+		dst_lagged = rq_lagged(env->dst_rq, target);
+		src_lagged = rq_lagged(env->src_rq, target);
+		/* source is faster than destination */
+		if (unlikely(dst_lagged >= src_lagged)) {
+			gpfs_stat_inc(env->sd, detach_neg_diff[env->idle]);
+			return 0;
+		}
+		max_lagged = dst_lagged;
+	} else{ /* idle or newly idle */
+		src_lagged = rq_lagged(env->src_rq, target);
+		dst_lagged = 0;
+		max_lagged = src_lagged >= 0 ? src_lagged : 0;
+	}
+
+	/* rare cases */
+	/* while (unlikely(dst_lagged < 0 || src_lagged < 0)) {
+		target += env->interval;	
+		dst_lagged = rq_lagged(env->dst_rq, target);
+		src_lagged = rq_lagged(env->src_rq, target);
+		lagged_diff = (src_lagged - dst_lagged) / 2;
+	} */
+#ifdef CONFIG_GPFS_RB_LEFTMOST_FIRST
+	p = pick_lowest_vruntime_task(env->src_rq);
+	if (p) {
+		env->loop++;
+		goto consider_a_task;
+	}
+#endif /* CONFIG_GPFS_RB_LEFTMOST_FIRST */
+
+	while (!list_empty(tasks)) {
+		/* TODO: we do not consider ASYM_PACKING */
+		
+		if (env->src_rq->nr_running <= 1 
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+				&& !env->slower_src
+#endif
+			) {
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		p = list_first_entry(tasks, struct task_struct, se.group_node);
+		
+		env->loop++;
+		if (env->loop > env->loop_max) {
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		if (env->loop > env->loop_break) {
+			env->loop_break += sched_nr_migrate_break;
+			env->flags |= LBF_NEED_BREAK;
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		
+#ifdef CONFIG_GPFS_RB_LEFTMOST_FIRST
+consider_a_task:
+#endif
+		gpfs_stat_inc(env->sd, detach_task_count[env->idle]);
+		if (!can_migrate_lagged_task(p, env)) {
+			gpfs_stat_inc(env->sd, detach_task_cannot[env->idle]);
+			goto next;
+		}
+
+		benefit = __migration_benefit(src_lagged, dst_lagged, max_lagged, 
+									target,	src_type, dst_type, &p->se);
+		if (benefit <= 0) {
+			gpfs_stat_inc(env->sd, detach_task_not_lag[env->idle]);
+			goto next;
+		}
+
+		gpfs_stat_inc(env->sd, detach_task_detach[env->idle]);
+		detach_task(p, env);
+		list_add(&p->se.group_node, &env->tasks);
+
+		detached++;
+		/* note that lagged > 0 */
+		max_lagged -= benefit;
+		dst_lagged += task_lagged_type(&p->se, target, dst_type);
+		src_lagged -= task_lagged_type(&p->se, target, src_type);
+
+#ifdef CONFIG_PREEMPT
+		/*
+		 * NEWIDLE balancing is a source of latency, so preemptible
+		 * kernels will stop after the first task is detached to minimize
+		 * the critical section.
+		 */
+		if (env->idle == CPU_NEWLY_IDLE)
+			break;
+#endif
+
+		/* this may not be the optimal solution */
+		if (dst_lagged >= src_lagged) {
+			/* even if CPU_IDLE case, we got a task */
+			gpfs_stat_inc(env->sd, detach_complete[env->idle]);
+			break;
+		}
+
+		continue;
+next:
+		list_move_tail(&p->se.group_node, tasks);
+	}
+
+	gpfs_stat_add(env->sd, tb_gained[env->idle], detached);
+
+	return detached;
+}
+#else /* !CONFIG_GPFS_AMP - SMP version */
+//#define DEBUG_LAGGED_DIFF
+static struct task_struct *detach_one_lagged_task(struct lb_env *env)
+{
+	struct task_struct *p, *n, *min_p = NULL;
+	u64 min_vruntime = 0;
+	int consider = 0;
+
+	lockdep_assert_held(&env->src_rq->lock);
+
+	list_for_each_entry_safe(p, n, &env->src_rq->cfs_tasks, se.group_node) {
+		if (!can_migrate_lagged_task(p, env))
+			continue;
+
+		if (!vruntime_passed(p->se.vruntime, env->target)) {
+			detach_task(p, env);
+			gpfs_stat_inc(env->sd, atb_pushed_under);
+			return p;
+		} else if (min_p == NULL || vruntime_passed(min_vruntime, p->se.vruntime)) {
+			min_p = p;
+			min_vruntime = p->se.vruntime;
+		}
+		
+		consider++;
+		if (consider > sysctl_sched_nr_migrate)
+			break;
+	}
+
+	if (min_p) {
+		detach_task(min_p, env);
+		gpfs_stat_inc(env->sd, atb_pushed);
+	} else {
+		gpfs_stat_inc(env->sd, atb_failed);
+	}
+	return min_p;
+}
+
+#ifdef DEBUG_LAGGED_DIFF
+static s64 __debug_sort(s64 *data, u64 num) {
+	s64 min, sum = 0;
+	u64 idx, min_idx, complete;
+
+	for(complete = 0; complete < num; complete++) {
+		min_idx = complete;
+		min = data[complete];
+		for (idx = complete + 1; idx < num; idx++) {
+			if (data[idx] < min) {
+				min_idx = idx;
+				min = data[idx];
+			}
+		}
+		if (min_idx != complete) {
+			data[min_idx] = data[complete];
+			data[complete] = min;
+		}
+		sum += min;
+	}
+
+	return sum;
+}
+
+/* rq: src_rq
+   mode: -1 for initialization. 0 for input. 1 for output.*/
+static void __debug_lagged_diff(int mode, struct rq *rq, s64 lagged_diff) {
+	static struct diff_history {
+		atomic64_t idx;
+		atomic64_t total;
+		s64 diff[1022]; /* to align cache line...actually we will use 1000 elements */
+	} *data;
+	int cpu = rq ? rq->cpu : -1;
+
+	if (unlikely(mode == -1)) {
+		data = kmalloc(sizeof(struct diff_history) * 16, GFP_KERNEL);
+		for (cpu = 0; cpu < 16; cpu++) {
+			atomic64_set(&data[cpu].idx, 0);
+			atomic64_set(&data[cpu].total, 0);
+		}
+		return;
+	} else if (mode == 0) {
+		u64 idx;
+
+		lockdep_assert_held(&rq->lock);
+		idx = atomic64_read(&data[cpu].idx);
+		if (idx >= 1000)
+			return;
+		data[cpu].diff[idx] = lagged_diff / 1024;
+		atomic64_inc(&data[cpu].idx);
+	} else if (mode == 1 && atomic64_read(&data[cpu].idx) == 1000) {
+		u64 idx;
+		s64 diff_sum = 0;
+
+		idx = atomic64_cmpxchg(&data[cpu].idx, 1000, 1001);
+		if (idx != 1000)
+			return; /* some guy is now printing... */
+
+		diff_sum = __debug_sort(data[cpu].diff, 1000);
+		/* Note that printk can be problematic with rq->lock */
+		printk(KERN_ERR "[%s] cpu: %d %%tile: %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld avg: %lld.%03lld\n",
+					__func__, cpu,
+					data[cpu].diff[0], data[cpu].diff[100], data[cpu].diff[200], data[cpu].diff[300], 
+					data[cpu].diff[400], data[cpu].diff[500], data[cpu].diff[600], data[cpu].diff[700], 
+					data[cpu].diff[800], data[cpu].diff[900], data[cpu].diff[999],
+					diff_sum / 1000, diff_sum % 1000);
+		
+		atomic64_set(&data[cpu].idx, 0);
+	}
+}
+#else /* !DEBUG_LAGGED_DIFF */
+#define __debug_lagged_diff(...) do{}while(0)
+#endif /* !DEBUG_LAGGED_DIFF */
+static int detach_lagged_tasks(struct lb_env *env)
+{
+	struct list_head *tasks = &env->src_rq->cfs_tasks;
+	struct task_struct *p;
+	struct task_struct *over_p = NULL, *not_lagged_p = NULL;
+	int detached = 0;
+	u64 target;
+	s64 dst_lagged, src_lagged;
+	s64 lagged_diff;
+	s64 lagged, over_lagged = LLONG_MAX, not_lagged = LLONG_MIN;
+
+	lockdep_assert_held(&env->src_rq->lock);
+
+	gpfs_stat_inc(env->sd, detach_count[env->idle]);
+
+	if (env->idle == CPU_NOT_IDLE) {
+		target = env->target + env->interval;
+		dst_lagged = rq_lagged(env->dst_rq, target);
+		src_lagged = rq_lagged(env->src_rq, target);
+		lagged_diff = (src_lagged - dst_lagged) / 2;
+	} else{ /* idle or newly idle */
+		target = env->target;
+		src_lagged = rq_lagged(env->src_rq, target);
+		lagged_diff = src_lagged / 2;
+	}
+
+
+	__debug_lagged_diff(0, env->src_rq, lagged_diff);
+
+	/* source is faster than destination */
+	if (unlikely(lagged_diff <= 0)) {
+		gpfs_stat_inc(env->sd, detach_neg_diff[env->idle]);
+		return 0;
+	}
+
+	/* rare cases */
+	/* while (unlikely(dst_lagged < 0 || src_lagged < 0)) {
+		target += env->interval;	
+		dst_lagged = rq_lagged(env->dst_rq, target);
+		src_lagged = rq_lagged(env->src_rq, target);
+		lagged_diff = (src_lagged - dst_lagged) / 2;
+	} */
+
+	while (!list_empty(tasks)) {
+		/* TODO: we do not consider ASYM_PACKING */
+
+		if (env->src_rq->nr_running <= 1) {
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		p = list_first_entry(tasks, struct task_struct, se.group_node);
+
+		env->loop++;
+		if (env->loop > env->loop_max) {
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		if (env->loop > env->loop_break) {
+			env->loop_break += sched_nr_migrate_break;
+			env->flags |= LBF_NEED_BREAK;
+			gpfs_stat_inc(env->sd, detach_loop_stop[env->idle]);
+			break;
+		}
+
+		
+		gpfs_stat_inc(env->sd, detach_task_count[env->idle]);
+		if (!can_migrate_lagged_task(p, env)) {
+			gpfs_stat_inc(env->sd, detach_task_cannot[env->idle]);
+			goto next;
+		}
+
+		lagged = task_lagged(&p->se, target);
+
+		if (lagged <= 0) {
+			if (lagged > not_lagged) {
+				not_lagged_p = p;
+				not_lagged = lagged;
+			}
+			gpfs_stat_inc(env->sd, detach_task_not_lag[env->idle]);
+			goto next;
+		}
+
+		if ((lagged / 2) > lagged_diff) {
+			if (lagged < over_lagged) {
+				over_p = p;
+				over_lagged = lagged;
+			}
+			gpfs_stat_inc(env->sd, detach_task_too_lag[env->idle]);
+			goto next;
+		}
+		
+		gpfs_stat_inc(env->sd, detach_task_detach[env->idle]);
+
+		detach_task(p, env);
+		list_add(&p->se.group_node, &env->tasks);
+
+		detached++;
+		/* note that lagged > 0 */
+		lagged_diff -= lagged;
+
+#ifdef CONFIG_PREEMPT
+		/*
+		 * NEWIDLE balancing is a source of latency, so preemptible
+		 * kernels will stop after the first task is detached to minimize
+		 * the critical section.
+		 */
+		if (env->idle == CPU_NEWLY_IDLE)
+			break;
+#endif
+
+		if (lagged_diff <= 0) {
+			gpfs_stat_inc(env->sd, detach_complete[env->idle]);
+			break;
+		}
+
+		continue;
+next:
+		list_move_tail(&p->se.group_node, tasks);
+	}
+
+	if (detached == 0 && over_p) {
+		detach_task(over_p, env);
+		list_add(&over_p->se.group_node, &env->tasks);
+		detached++;
+		gpfs_stat_inc(env->sd, detach_task_too_detach[env->idle]);
+	}
+
+	/* for idle cases,
+	   pulling a not lagged task is a good option if there is no other options. */
+	//if (detached == 0 && not_lagged_p && env->idle != CPU_NOT_IDLE) {
+	if (detached == 0 && not_lagged_p) {
+		detach_task(not_lagged_p, env);
+		list_add(&not_lagged_p->se.group_node, &env->tasks);
+		detached++;
+		gpfs_stat_inc(env->sd, detach_task_not_detach[env->idle]);
+	}
+
+	gpfs_stat_add(env->sd, tb_gained[env->idle], detached);
+
+	return detached;
+}
+#endif /* !CONFIG_GPFS_AMP - SMP version */
+
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+static int find_dst_cpu(int __sd_level, int src_cpu) {
+	struct sched_domain *sd;
+	int sd_level = -(__sd_level + 1);
+	int cpu, dst_cpu = -1, dst_idle_cpu = -1;
+#ifdef CONFIG_GPFS_AMP
+	int dst_idle_type = -1;
+#endif
+	unsigned int min_exit_latency = UINT_MAX;
+	u64 latest_idle_timestamp = 0;
+	s64 lagged, min_lagged = LLONG_MAX;
+	u64 target;
+
+	for_each_domain(src_cpu, sd) {
+		sd_level--;
+		if (sd_level < 0)
+			break;
+	}
+
+	if (unlikely(sd_level >= 0 || !sd)) {/* error */
+		printk(KERN_ERR "[%s] ERROR cannot find sched domain src: %d sd_level: %d -> %d\n", 
+							__func__, src_cpu, -(__sd_level + 1), sd_level);
+		return -1;
+	}
+
+	/* similar to find_fastest_cpu() */
+	target = atomic64_read(&sd->vruntime->target);
+
+	for_each_cpu(cpu, to_cpumask(sd->span)) {
+		if (cpu == src_cpu) /* prevent to select src_cpu */
+			continue;
+
+		if (idle_cpu(cpu)) {
+			struct rq *rq = cpu_rq(cpu);
+			struct cpuidle_state *idle = idle_get_state(rq);
+
+#ifdef CONFIG_GPFS_AMP
+			if (rq->cpu_type < dst_idle_type)
+				/* when dst_idle_cpu < 0, dst_idle_type < 0.
+				 * Also, rq->cpu_type >= 0 always. */
+				continue;
+#endif
+
+			if (dst_idle_cpu < 0 
+#ifdef CONFIG_GPFS_AMP
+					|| rq->cpu_type > dst_idle_type
+#endif
+										) { /* first */
+				if (idle)
+					min_exit_latency = idle->exit_latency;
+				latest_idle_timestamp = rq->idle_stamp;
+				dst_idle_cpu = cpu;
+#ifdef CONFIG_GPFS_AMP
+				dst_idle_type = rq->cpu_type;
+#endif
+			} else if (idle && idle->exit_latency < min_exit_latency) {
+				min_exit_latency = idle->exit_latency;
+				latest_idle_timestamp = rq->idle_stamp;
+				dst_idle_cpu = cpu;
+				/* dst_idle_type == rq->cpu_type */
+			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
+						rq->idle_stamp > latest_idle_timestamp) {
+				latest_idle_timestamp = rq->idle_stamp;
+				dst_idle_cpu = cpu;
+			}
+		} else if (dst_idle_cpu == -1) {
+			lagged = cpu_lagged(cpu, target);
+			if (lagged < min_lagged) {
+				min_lagged = lagged;
+				dst_cpu = cpu;
+			}
+
+		}
+	}
+
+	if (unlikely(dst_idle_cpu < 0 && dst_cpu < 0)) { /* error */
+		printk(KERN_ERR "[%s] ERROR cannot find dst_cpu: src: %d sd_level: %d dst_cpu: %d dst_idle_cpu: %d\n", 
+							__func__, src_cpu, -(__sd_level + 1), dst_cpu, dst_idle_cpu);
+		return -1;
+	}
+
+	return dst_idle_cpu >= 0 ? dst_idle_cpu : dst_cpu;
+}
+#endif /* CONFIG_GPFS_SRC_ACTIVATED_BALANCING */
+
+/*
+ * active_target_vruntime_balance_cpu_stop is run by cpu stopper. It pushes
+ * running tasks off the busiest CPU onto idle CPUs. It requires at
+ * least 1 task to be running on each physical CPU where possible, and
+ * avoids physical / logical imbalances.
+ */
+static int active_target_vruntime_balance_cpu_stop(void *data)
+{
+	struct rq *src_rq = data;
+	int src_cpu = cpu_of(src_rq);
+	int dst_cpu = src_rq->push_cpu;
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+	struct rq *dst_rq;
+#else
+	struct rq *dst_rq = cpu_rq(dst_cpu);
+#endif
+	struct sched_domain *sd;
+	struct task_struct *p = NULL;
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	int src_activated = src_rq->active_balance == 2 ? 1 : 0;
+	//if (src_activated)
+	//	printk(KERN_ERR "do_src_active: src: %d dst: %d\n", src_cpu, dst_cpu);
+	if (src_activated)
+		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_START;
+#endif
+
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+	if (dst_cpu >= 0)
+		dst_rq = cpu_rq(dst_cpu);
+	else { /* source activated balancing */
+		dst_cpu = find_dst_cpu(dst_cpu, src_cpu);
+		if (unlikely(dst_cpu < 0))
+			return 0;
+		dst_rq = cpu_rq(dst_cpu);
+	}
+#endif
+	raw_spin_lock_irq(&src_rq->lock);
+
+	/* make sure the requested cpu hasn't gone down in the meantime */
+	if (unlikely(src_cpu != smp_processor_id() ||
+		     !src_rq->active_balance))
+		goto out_unlock;
+		
+	/* Is there any task to move? */
+	if (src_rq->nr_running <= 1)
+		goto out_unlock;
+
+	/*
+	 * This condition is "impossible", if it occurs
+	 * we need to fix it. Originally reported by
+	 * Bjorn Helgaas on a 128-cpu setup.
+	 */
+	BUG_ON(src_rq == dst_rq);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activated)
+		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_CONDITION;
+#endif
+
+	/* Search for an sd spanning us and the target CPU. */
+	rcu_read_lock();
+	for_each_domain(dst_cpu, sd) {
+		if ((sd->flags & SD_LOAD_BALANCE) &&
+			cpumask_test_cpu(src_cpu, sched_domain_span(sd)))
+				break;
+	}
+
+	if (likely(sd)) {
+		struct lb_env env = {
+			.sd		= sd,
+			.dst_cpu	= dst_cpu,
+			.dst_rq		= dst_rq,
+			.src_cpu	= src_cpu,
+			.src_rq		= src_rq,
+			.target     = atomic64_read(&sd->vruntime->target),
+			.interval   = sd->vruntime->interval,
+			.idle		= CPU_IDLE,
+		};
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+//if (src_activated)
+//	printk(KERN_ERR "start_src_active: src: %d dst: %d\n", src_cpu, dst_cpu);
+	if (src_activated)
+		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_DETACH;
+#endif
+
+		gpfs_stat_inc(sd, atb_count);
+
+		p = detach_one_lagged_task(&env);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+if (src_activated) {
+//	printk(KERN_ERR "detached_src_active: src: %d dst: %d p: %s\n", src_cpu, dst_cpu, !p ? "NULL" : p->comm);
+	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_DETACH_END;
+}
+#endif
+		if (p)
+			gpfs_stat_inc(sd, tb_gained[CPU_IDLE]);
+	}
+	rcu_read_unlock();
+
+out_unlock:
+	src_rq->active_balance = 0;
+	raw_spin_unlock(&src_rq->lock);
+
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+if (src_activated)
+	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_ATTACH_END;
+#endif
+	if (p)
+		attach_one_task(dst_rq, p);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+if (src_activated) {
+//	printk(KERN_ERR "attached_src_active: src: %d dst: %d p: %s\n", src_cpu, dst_cpu, !p ? "NULL" : p->comm);
+	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_ATTACH_END;
+}
+#endif
+
+	local_irq_enable();
+
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+if (src_activated)
+	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_RETURN;
+#endif
+	return 0;
+}
+
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+int cpu_stop_thread_on_cpu(unsigned int cpu);
+#endif
+
+static int __target_vruntime_balance(int this_cpu, struct rq *this_rq, 
+					struct sched_domain *sd, enum cpu_idle_type idle,
+					u64 target, u64 interval, u64 tolerance) 
+{
+	int pulled_tasks = 0, cur_pulled_tasks;
+	int need_active_balance = 0, do_active_balance = 0;
+	struct sched_group *group;
+	
+	struct rq *lagged_rq;
+	unsigned long flags;
+	struct cpumask *cpus = this_cpu_cpumask_var_ptr(load_balance_mask);
+	
+	struct lb_env env = {
+		.sd		= sd,
+		.dst_cpu	= this_cpu,
+		.dst_rq		= this_rq,
+		//.dst_grpmask    = sched_group_cpus(sd->groups),
+		.idle		= idle,
+		.loop		= 0,
+		.loop_break	= sched_nr_migrate_break,
+		.cpus		= cpus,
+		.tasks		= LIST_HEAD_INIT(env.tasks),
+		.target 	= target,
+		.interval   = interval,
+		.tolerance  = idle == CPU_NOT_IDLE ? tolerance : 0,
+	};
+
+#if CONFIG_GPFS_TOLERANCE_PERCENT > 0
+	/* if idle != CPU_NOT_IDLE, ignore the tolerance */
+	/* if (idle == CPU_NOT_IDLE)
+		env.target -= tolerance; */
+#endif
+	
+	cpumask_and(cpus, cpu_active_mask, sched_domain_span(sd));
+#ifdef CONFIG_GPFS_BALANCING_IGNORE_LOCAL_GROUP
+	/* since local group balancing was considered at lower level domain. */
+	cpumask_andnot(cpus, cpus, sched_group_cpus(sd->groups));
+#else
+	cpumask_clear_cpu(this_cpu, cpus);
+#endif
+	gpfs_stat_inc(sd, tb_count[idle]);
+
+redo:
+
+	group = find_most_lagged_group(&env);
+	if (group == NULL) {
+		gpfs_stat_inc(sd, tb_nolaggedgroup[idle]);
+		goto out_balanced;
+	}
+	lagged_rq = find_most_lagged_rq(&env, group);
+	if (lagged_rq == NULL) {
+		gpfs_stat_inc(sd, tb_nolaggedcpu[idle]);
+		goto out_balanced;
+	}
+
+	env.src_cpu = lagged_rq->cpu;
+	env.src_rq = lagged_rq;
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+	env.slower_src = env.src_rq->cpu_type < env.dst_rq->cpu_type;
+#endif
+
+	pulled_tasks = 0;
+	if (env.src_rq->nr_running > 1
+#ifdef CONFIG_GPFS_AMP_AGGRESSIVE
+			|| env.slower_src
+#endif
+		) {
+		/* attempt to move lagged tasks. */
+		env.flags |= LBF_ALL_PINNED;
+		env.loop_max = min(sysctl_sched_nr_migrate, env.src_rq->nr_running);
+
+		raw_spin_lock_irqsave(&env.src_rq->lock, flags);
+
+		/* cur_pulled_tasks - # tasks moved in current iteration
+		 * pulled_tasks     - # tasks moved across iterations
+		 */
+		cur_pulled_tasks = detach_lagged_tasks(&env);
+
+		raw_spin_unlock(&env.src_rq->lock);
+		__debug_lagged_diff(1, env.src_rq, 0);
+
+		if (cur_pulled_tasks) {
+			attach_tasks(&env);
+			pulled_tasks += cur_pulled_tasks;
+		}
+
+		local_irq_restore(flags);
+		
+		/* All tasks on this runqueue were pinned by CPU affinity */
+		if (unlikely(env.flags & LBF_ALL_PINNED)) {
+			cpumask_clear_cpu(env.src_cpu, cpus);
+			if (!cpumask_empty(cpus)) {
+				env.loop = 0;
+				env.loop_break = sched_nr_migrate_break;
+				goto redo;
+			}
+			goto out_all_pinned;
+		} else if (pulled_tasks == 0) {
+			/* !(env.flags & LBF_ALL_PINNED) && pulled_tasks == 0
+				=> the only task possible to pull is the running task */
+			gpfs_stat_inc(sd, tb_all_pinned_but_running[idle]);
+			need_active_balance = 1;
+		}
+
+	} else {
+		/* env.src_rq->nr_running == 1
+		 * TODO
+		 * 1. For uneven multicores, we may consider its characteristics.
+		 * 2. Even for SMP, we may consider the migration if
+		 *     1) the task in lagged_rq have running_time / runnable_time < 1.0,
+		 *        since lagged_rq actually have 2+ tasks, but others are blocked for a while.
+		 *     2) this_rq is in long idle periods.
+		 *
+		 * if the migration is needed, set @need_active_balance = 1.
+		 */
+		 
+
+		 /* BUT, NOW, WE DO NOTHING. */
+		 /* XXX: if you want to do something more,
+		 		please modify find_most_lagged_rq().
+				It ignores rq with nr_running < 2 */
+	}
+
+	if (need_active_balance) {
+		raw_spin_lock_irqsave(&env.src_rq->lock, flags);
+
+		if (env.src_rq->cfs.h_nr_running == 0) {
+			env.flags |= LBF_ALL_PINNED;
+			goto unlock_one_pinned;
+		}
+
+		if (env.src_rq->curr->sched_class == &fair_sched_class) {
+			if (!cpumask_test_cpu(this_cpu,
+					tsk_cpus_allowed(env.src_rq->curr))) {
+				env.flags |= LBF_ALL_PINNED;
+				goto unlock_one_pinned;
+			} 
+
+#ifdef CONFIG_GPFS_AMP
+			if (migration_benefit(env.src_rq->curr, &env) < 0) {
+				env.flags |= LBF_ALL_PINNED;
+				goto unlock_one_pinned;
+			};
+#endif /* CONFIG_GPFS_AMP */
+		}
+
+		/*
+		 * ->active_balance synchronizes accesses to
+		 * ->active_balance_work.  Once set, it's cleared
+		 * only after active load balance is finished.
+		 */
+		if (!env.src_rq->active_balance
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+			/* if source activated balancing is used,
+			 * there may be contention on stopper[cpu]->thread->on_cpu.
+			 * See kernel/sched/core.c:try_to_wake_up()=>smp_cond_acquire(!p->on_cpu)
+			 * It may cause large amount of loops 
+			 */
+				&& !cpu_stop_thread_on_cpu(env.src_cpu)
+#endif
+				) {
+			env.src_rq->active_balance = 1;
+			env.src_rq->push_cpu = this_cpu;
+			do_active_balance = 1;
+		}
+unlock_one_pinned:
+		raw_spin_unlock_irqrestore(&env.src_rq->lock, flags);
+
+		if (do_active_balance) {
+			stop_one_cpu_nowait(cpu_of(env.src_rq),
+				active_target_vruntime_balance_cpu_stop, env.src_rq,
+				&env.src_rq->active_balance_work);
+		}
+		
+	}
+
+out_balanced:
+out_all_pinned:
+	return pulled_tasks;
+}
+
+static int _target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle_init) {
+	int pulled_tasks = 0;
+	int this_cpu = this_rq->cpu;
+	enum cpu_idle_type idle = idle_init;
+	struct cfs_rq *cfs_rq = &this_rq->cfs;
+	struct sched_domain *sd;
+	struct sd_vruntime *sd_vruntime;
+	u64 target, interval, tolerance;
+	u64 old_target;
+	u64 my_target;
+	u64 min_vruntime;
+	
+	min_vruntime = real_min_vruntime(cfs_rq);
+	my_target = cfs_rq->target_vruntime; /* next level-0 target (updated at target_vruntime_balance() */
+	interval = cfs_rq->target_interval;
+
+	while (unlikely(vruntime_passed(min_vruntime, my_target + interval))) {
+		my_target += interval;
+	}
+	
+	update_blocked_averages(this_cpu); // We do not care the load now...
+	
+	rcu_read_lock();
+	for_each_domain(this_cpu, sd) {
+		sd_vruntime = sd->vruntime;
+		target = atomic64_read(&sd_vruntime->target);
+		interval = sd_vruntime->interval;
+		tolerance = sd_vruntime->tolerance;
+
+		gpfs_stat_inc(sd, tvb_count[idle_init]);
+
+		if (vruntime_passed(target, min_vruntime) && idle == CPU_NOT_IDLE) {
+			gpfs_stat_inc(sd, tvb_not_reach[idle_init]);
+			/* we do not reach the target yet. See you later. */
+			break;
+		}
+
+		/* newly idle cases are the source of latency.
+		 * if this is a newly idle case and there is any pulled tasks,
+		 * do not pull tasks further and just check the higher level domains. */
+		if (pulled_tasks == 0 || idle_init != CPU_NEWLY_IDLE) {
+#ifdef CONFIG_GPFS_STATS
+			int temp;
+			temp = __target_vruntime_balance(this_cpu, this_rq, sd, idle,
+												target, interval, tolerance);
+			gpfs_stat_inc(sd, tvb_pull_count[idle_init]);
+			if (temp > 0)
+				gpfs_stat_add(sd, tvb_pull_gained[idle_init], temp);
+			else
+				gpfs_stat_inc(sd, tvb_pull_no_gain[idle_init]);
+#else /* !CONFIG_GPFS_STATS */
+			pulled_tasks += __target_vruntime_balance(this_cpu, this_rq, sd, idle,
+														target, interval, tolerance);
+#endif /* !CONFIG_GPFS_STATS */
+		}
+
+		if (pulled_tasks > 0) {
+			/* Now, we do not use LBF_DST_PINNED logic. *
+			 * Refer to rebalance_domains()             */
+			idle = idle_cpu(this_cpu) ? idle_init : CPU_NOT_IDLE;
+			min_vruntime = real_min_vruntime(cfs_rq);
+		} else if (idle != CPU_NOT_IDLE) {
+			/* cpu is idle, but nothing to pull... */
+			/* even if min_vruntime > target, do not update the target.
+			   The actual value of min_vruntime = 0. */
+			gpfs_stat_inc(sd, tvb_idle_continue[idle_init]);
+			continue;
+		}
+
+		target = atomic64_read(&sd_vruntime->target); /* refresh the target */
+		   
+		if (vruntime_passed(target, min_vruntime)) {
+#ifdef CONFIG_GPFS_MIN_TARGET
+			if (idle != CPU_NOT_IDLE)
+				update_min_target(sd_vruntime, target, 0);
+#endif /* CONFIG_GPFS_MIN_TARGET */
+			if (pulled_tasks > 0) {
+				gpfs_stat_inc(sd, tvb_stay[idle_init]);
+				break; /* stay in this round */
+			} else { /* pulled_tasks == 0 */
+				/* We are the lagged or idle cpu, but no jobs to pull.
+				 * Thus, we do not need to update the target of domain at this level.
+				 * Let's go to the higher level.
+				 */
+				gpfs_stat_inc(sd, tvb_not_update[idle_init]);
+				continue;
+			}
+		}
+
+		/* Every core in this domain is ok. Go to the next round.
+		 * (even if cpu is idle, we have min_vruntime > my_target.
+		 * We should go to the next round.)
+		 */
+#if 0
+		while (my_target > target)
+			target += interval;
+		/* Between sd_vruntime->target and sd_vruntime->updated_by, racing is allowed */
+		old_target = atomic64_xchg(&sd_vruntime->target, target);
+		if (likely(target > old_target)) {
+			atomic_set(&sd_vruntime->updated_by, this_cpu); 
+			gpfs_stat_inc(sd, tvb_update_target[idle_init]);
+		} else while (unlikely(target < old_target)) {
+			gpfs_stat_inc(sd, target_update_racing);
+			target = old_target;
+			old_target = atomic64_xchg(&sd_vruntime->target, target);
+		}
+#endif
+again:
+		old_target = target;
+		while (my_target >= target)
+			target += interval;
+		/* Between sd_vruntime->target and sd_vruntime->updated_by, racing is allowed */
+		target = atomic64_cmpxchg(&sd_vruntime->target, old_target, target);
+		if (target == old_target) {
+			atomic_set(&sd_vruntime->updated_by, this_cpu);
+			gpfs_stat_inc(sd, tvb_update_target[idle_init]);
+		} else {
+			gpfs_stat_inc(sd, target_update_racing);
+			if (my_target >= target)
+				goto again;
+		}
+#ifdef CONFIG_GPFS_MIN_TARGET
+		update_min_target(sd_vruntime, atomic64_read(&sd_vruntime->target), 1);
+#endif /* CONFIG_GPFS_MIN_TARGET */
+	}
+
+	rcu_read_unlock();
+
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+#ifdef CONFIG_NO_HZ_COMMON
+	/* to prevent repetitive balancing in a tick */
+	this_rq->next_balance = jiffies + 1;
+#endif
+#endif
+
+	return pulled_tasks;
+}
+
+/* for GPFS_STATS, GPFS_SRC_ACTIVATED_BALANCING, GPFS_INFEASIBLE_WEIGHT */
+static u64 check_target_diff(struct rq *rq, struct sched_domain **large_diff_sd) {
+	int cpu = cpu_of(rq);
+	struct sched_domain *sd;
+	struct sd_vruntime *sd_vruntime;
+	u64 my_target = rq->cfs.target_vruntime;
+	u64 target, interval; 
+	u64 diff, max_diff = 0;
+
+#if !defined(CONFIG_GPFS_STATS) && !defined(CONFIG_GPFS_INFEASIBLE_WEIGHT)
+	if (rq->nr_running <= 1 || rq->active_balance)
+		return NULL;
+#endif
+
+	rcu_read_lock();
+	for_each_domain(cpu, sd) {
+		sd_vruntime = sd->vruntime;
+		target = atomic64_read(&sd_vruntime->target);
+		interval = sd_vruntime->interval;
+		if (target > my_target) {
+			diff = (target - my_target) / interval;
+#if defined(CONFIG_GPFS_SRC_ACTIVATED_BALANCING) || defined(CONFIG_GPFS_INFEASIBLE_WEIGHT)
+			if (diff > CONFIG_GPFS_TARGET_DIFF_THRESHOLD) {
+				*large_diff_sd = sd;
+				if (diff > max_diff)
+					max_diff = diff;
+			}
+#endif /* CONFIG_GPFS_SRC_ACTIVATED_BALANCING || CONFIG_GPFS_INFEASIBLE_WEIGHT */
+		}
+#ifdef CONFIG_GPFS_STATS
+		else
+			diff = 0;
+		if (diff >= NUM_MAX_TARGET_DIFF)
+			diff = NUM_MAX_TARGET_DIFF - 1;
+		gpfs_stat_inc(sd, target_diff[diff]);
+#endif /* CONFIG_GPFS_STATS */
+	}
+	rcu_read_unlock();
+
+	return max_diff;
+}
+
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+void check_infeasible_weight(struct rq *this_rq, u64 max_diff, struct sched_domain *sd) {
+	struct sd_vruntime *sdv;
+	struct rq *rq;
+	int cpu;
+	int infeasible_weight;
+
+	if (max_diff < CONFIG_GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT) { /* target diff < GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT */
+		if (this_rq->infeasible_weight)
+			this_rq->infeasible_weight = 0;
+		return;
+	}
+
+	if (this_rq->cfs.h_nr_running > 1)
+		return;
+
+	if (this_rq->infeasible_weight)
+		return;
+
+	sdv = sd->vruntime;
+	cpu = atomic_read(&sdv->updated_by);
+	if (cpu >= 0) {
+		rq = cpu_rq(cpu);
+		if (rq->cfs.lagged_weight <= this_rq->cfs.lagged_weight) {
+			/* we cannot catch up the target */
+			goto detect_infeasible_weight;
+		}
+	}
+
+	infeasible_weight = 0;
+	for_each_cpu(cpu, to_cpumask(sdv->span)) {
+		if (idle_cpu(cpu))
+			continue;
+
+		rq = cpu_rq(cpu);
+
+		if (rq->infeasible_weight)
+			continue;
+
+		if (rq->cfs.lagged_weight > this_rq->cfs.lagged_weight) {
+			infeasible_weight = 0;
+			break;
+		}
+
+		/* Now, this_rq can have infeasible weight 
+			unless there is a CPU with rq->cfs.lagged_weight > this_rq->cfs.lagged_weight*/
+		infeasible_weight = 1; 
+	}
+
+	if (infeasible_weight == 0)
+		return;
+
+detect_infeasible_weight:
+	this_rq->infeasible_weight = 1;
+	delete_min_target_rq(&this_rq->cfs);
+}
+#endif
+
+static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
+{
+	int pulled_tasks = 0;
+	struct sched_domain *large_diff_sd = NULL;
+	u64 max_diff;
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+	int do_active_balance = 0;
+#endif
+	struct cfs_rq *cfs_rq = &this_rq->cfs;
+	u64 target;
+	u64 min_vruntime = real_min_vruntime(cfs_rq);
+
+	if (unlikely(!this_rq->sd_vruntime))
+		/* XXX: during initialization....how to prevent this? 
+				What is the proper value for initial target_vruntime? */
+		return 0;
+
+	gpfs_stat_inc(this_rq, tvb_count[idle]);
+
+	max_diff = check_target_diff(this_rq, &large_diff_sd);
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+	check_infeasible_weight(this_rq, max_diff, large_diff_sd);
+#endif
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+	if (large_diff_sd && this_rq->nr_running > 1) {
+		//int dst_cpu = atomic_read(&large_diff_sd->vruntime->updated_by);
+		//if (dst_cpu >= 0 && dst_cpu != cpu_of(this_rq)) {
+			gpfs_stat_inc(this_rq, satb_cond);
+			/* if cpu_stopper->thread->on_cpu == 1, 
+			 * cpu_stopper may be the previous task,
+			 * then kernel/sched/core.c:try_to_wake_up()=>smp_cond_acquire(!p->on_cpu) causes infinite loop. */
+			if (!this_rq->active_balance && !cpu_stop_thread_on_cpu(cpu_of(this_rq))) {
+				this_rq->active_balance = 2;
+				//this_rq->push_cpu = dst_cpu;
+				this_rq->push_cpu = -large_diff_sd->level - 1;
+				do_active_balance = 1;
+				gpfs_stat_inc(this_rq, satb_try);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+				//printk(KERN_ERR "try_to_src_active: src: %d dst: %d\n", cpu_of(this_rq), dst_cpu);
+				this_rq->src_active_mode = SRC_ACTIVE_TRY;
+#endif
+				goto skip_fast_check;
+			}
+		//}
+	} 
+#endif
+
+	if (idle == CPU_NOT_IDLE) {
+		/* Fast level-0 checking before release the lock. */
+		target = atomic64_read(&this_rq->sd_vruntime->target);
+		if (vruntime_passed(target, min_vruntime)) {
+#ifdef CONFIG_GPFS_MIN_TARGET
+			target = cfs_rq->target_vruntime;
+			while (vruntime_passed(min_vruntime, target))
+				target += cfs_rq->target_interval;
+#endif
+			/* we are not the fastest one. Just update the target. */
+			update_target_vruntime_cache(cfs_rq, target, 1);
+			gpfs_stat_inc(this_rq, tvb_fast_path[idle]);
+			return 0;
+		}
+	}
+
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+skip_fast_check:
+#endif
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING 
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	if (idle == CPU_NEWLY_IDLE)
+		this_rq->idle_stamp = rq_clock(this_rq);
+#endif
+
+	raw_spin_unlock(&this_rq->lock);
+
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+	if (do_active_balance) {
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+		//printk(KERN_ERR "queue_src_active: src: %d dst: %d\n", cpu_of(this_rq), this_rq->push_cpu);
+		this_rq->src_active_mode = SRC_ACTIVE_QUEUE;
+		BUG_ON(!this_rq);
+#endif
+		stop_one_cpu_nowait(cpu_of(this_rq),
+			active_target_vruntime_balance_cpu_stop, this_rq,
+			&this_rq->active_balance_work);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+		this_rq->src_active_mode = SRC_ACTIVE_QUEUE_DONE;
+		//printk(KERN_ERR "queued_src_active: src: %d dst: %d\n", cpu_of(this_rq), this_rq->push_cpu);
+#endif
+	} else /* call _target_vruntime_balance */
+#endif
+		pulled_tasks = _target_vruntime_balance(this_rq, idle);
+			
+	raw_spin_lock(&this_rq->lock);
+	
+	/* for load aware GPFS, target vruntime cache is tightly related to cfs_rq->lagged.
+	 * Thus, we need to synchronize the values,
+	 * and we update it under rq->lock. 
+	 */
+#ifdef CONFIG_GPFS_MIN_TARGET
+	target = cfs_rq->target_vruntime;
+	min_vruntime = real_min_vruntime(cfs_rq);
+	while (vruntime_passed(min_vruntime, target))
+		target += cfs_rq->target_interval;
+	if (cfs_rq->target_vruntime < target)
+		update_target_vruntime_cache(cfs_rq, target, 1);
+#else
+	target = atomic64_read(&this_rq->sd_vruntime->target);
+	if (cfs_rq->target_vruntime < target)
+		update_target_vruntime_cache(cfs_rq, target, 1);
+#endif
+	
+	/*
+	 * While browsing the domains, we released the rq lock, a task could
+	 * have been enqueued in the meantime. Since we're not going idle,
+	 * pretend we pulled a task.
+	 */
+	if (this_rq->cfs.h_nr_running && !pulled_tasks)
+		pulled_tasks = 1;
+
+	/* Is there a task of a high priority class? */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+		pulled_tasks = -1;
+
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING 
+	if (idle == CPU_NEWLY_IDLE && pulled_tasks)
+		this_rq->idle_stamp = 0;
+#endif
+
+	return pulled_tasks;
+}
+#endif /* CONFIG_GPFS */
+
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * active_load_balance_cpu_stop is run by cpu stopper. It pushes
  * running tasks off the busiest CPU onto idle CPUs. It requires at
@@ -7653,6 +11394,7 @@ out_unlock:
 
 	return 0;
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 static inline int on_null_domain(struct rq *rq)
 {
@@ -7668,6 +11410,10 @@ static inline int on_null_domain(struct rq *rq)
  */
 static struct {
 	cpumask_var_t idle_cpus_mask;
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	cpumask_var_t idle_cpus_mask_type[NUM_CPU_TYPES];
+	atomic_t nr_cpus_acc[NUM_CPU_TYPES];
+#endif
 	atomic_t nr_cpus;
 	unsigned long next_balance;     /* in jiffy units */
 } nohz ____cacheline_aligned;
@@ -7712,12 +11458,21 @@ static void nohz_balancer_kick(void)
 
 static inline void nohz_balance_exit_idle(int cpu)
 {
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	int type;
+#endif
 	if (unlikely(test_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu)))) {
 		/*
 		 * Completely isolated CPUs don't ever set, so we must test.
 		 */
 		if (likely(cpumask_test_cpu(cpu, nohz.idle_cpus_mask))) {
 			cpumask_clear_cpu(cpu, nohz.idle_cpus_mask);
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+		type = cpu_rq(cpu)->cpu_type;
+		cpumask_clear_cpu(cpu, nohz.idle_cpus_mask_type[type]);
+		for (; type >= 0; type--)
+			atomic_dec(&nohz.nr_cpus_acc[type]);
+#endif /* CONFIG_GPFS_AMP_NO_HZ */
 			atomic_dec(&nohz.nr_cpus);
 		}
 		clear_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
@@ -7764,6 +11519,9 @@ unlock:
  */
 void nohz_balance_enter_idle(int cpu)
 {
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	int type;
+#endif
 	/*
 	 * If this cpu is going down, then nothing needs to be done.
 	 */
@@ -7780,6 +11538,12 @@ void nohz_balance_enter_idle(int cpu)
 		return;
 
 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	type = cpu_rq(cpu)->cpu_type;
+	cpumask_set_cpu(cpu, nohz.idle_cpus_mask_type[type]);
+	for (; type >= 0; type--)
+		atomic_inc(&nohz.nr_cpus_acc[type]);
+#endif /* CONFIG_GPFS_AMP_NO_HZ */
 	atomic_inc(&nohz.nr_cpus);
 	set_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
 }
@@ -7797,7 +11561,9 @@ static int sched_ilb_notifier(struct notifier_block *nfb,
 }
 #endif
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 static DEFINE_SPINLOCK(balancing);
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 /*
  * Scale the max load_balance interval with the number of CPUs in the system.
@@ -7808,6 +11574,7 @@ void update_max_interval(void)
 	max_load_balance_interval = HZ*num_online_cpus()/10;
 }
 
+#ifndef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
 /*
  * It checks each scheduling domain to see if it is due to be balanced,
  * and initiates a balancing operation if so.
@@ -7916,6 +11683,7 @@ out:
 #endif
 	}
 }
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 
 #ifdef CONFIG_NO_HZ_COMMON
 /*
@@ -7930,12 +11698,26 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 	/* Earliest time when we have to do rebalance again */
 	unsigned long next_balance = jiffies + 60*HZ;
 	int update_next_balance = 0;
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	int type;
+#endif
 
 	if (idle != CPU_IDLE ||
 	    !test_bit(NOHZ_BALANCE_KICK, nohz_flags(this_cpu)))
 		goto end;
 
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	type = NUM_CPU_TYPES - 1;
+	balance_cpu = -1;
+	while (type >= 0) {
+		balance_cpu = cpumask_next(balance_cpu, nohz.idle_cpus_mask_type[type]);
+		if (balance_cpu >= nr_cpu_ids) {
+			type--;
+			continue;
+		}
+#else
 	for_each_cpu(balance_cpu, nohz.idle_cpus_mask) {
+#endif
 		if (balance_cpu == this_cpu || !idle_cpu(balance_cpu))
 			continue;
 
@@ -7958,14 +11740,22 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 			update_rq_clock(rq);
 			update_cpu_load_idle(rq);
 			raw_spin_unlock_irq(&rq->lock);
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+			_target_vruntime_balance(rq, CPU_IDLE);
+#else /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 			rebalance_domains(rq, CPU_IDLE);
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 		}
 
 		if (time_after(next_balance, rq->next_balance)) {
 			next_balance = rq->next_balance;
 			update_next_balance = 1;
 		}
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	} /* for vim...*/
+#else
 	}
+#endif
 
 	/*
 	 * next_balance will be updated only when there is a need.
@@ -8000,10 +11790,10 @@ static inline bool nohz_kick_needed(struct rq *rq)
 	if (unlikely(rq->idle_balance))
 		return false;
 
-       /*
-	* We may be recently in ticked or tickless idle mode. At the first
-	* busy tick after returning from idle, we will update the busy stats.
-	*/
+    /*
+	 * We may be recently in ticked or tickless idle mode. At the first
+	 * busy tick after returning from idle, we will update the busy stats.
+	 */
 	set_cpu_sd_state_busy();
 	nohz_balance_exit_idle(cpu);
 
@@ -8019,6 +11809,13 @@ static inline bool nohz_kick_needed(struct rq *rq)
 
 	if (rq->nr_running >= 2)
 		return true;
+
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	if (rq->cpu_type + 1 < NUM_CPU_TYPES
+			&& rq->cfs.h_nr_running >= 1 
+			&& atomic_read(&nohz.nr_cpus_acc[rq->cpu_type + 1]) > 0)
+		return true;
+#endif
 
 	rcu_read_lock();
 	sd = rcu_dereference(per_cpu(sd_busy, cpu));
@@ -8076,7 +11873,11 @@ static void run_rebalance_domains(struct softirq_action *h)
 	 * and abort nohz_idle_balance altogether if we pull some load.
 	 */
 	nohz_idle_balance(this_rq, idle);
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+	_target_vruntime_balance(this_rq, idle);
+#else /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 	rebalance_domains(this_rq, idle);
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 }
 
 /*
@@ -8088,8 +11889,19 @@ void trigger_load_balance(struct rq *rq)
 	if (unlikely(on_null_domain(rq)))
 		return;
 
+#ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+	/* call the target_vruntime_balance() for each tick. */
+#ifdef CONFIG_NO_HZ_COMMON
+	if (rq->idle_balance && time_after_eq(jiffies, rq->next_balance))
+		raise_softirq(SCHED_SOFTIRQ);
+#else
+	if (rq->idle_balance)
+		raise_softirq(SCHED_SOFTIRQ);
+#endif
+#else /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
+#endif /* !CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING */
 #ifdef CONFIG_NO_HZ_COMMON
 	if (nohz_kick_needed(rq))
 		nohz_balancer_kick();
@@ -8126,8 +11938,32 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		entity_tick(cfs_rq, se, queued);
 	}
 
+#ifdef CONFIG_GPFS
+	if (update_eff_load(&curr->se, se))
+		/* if eff_load is updated, update the lagged. */
+		update_lagged(&curr->se, &rq->cfs);
+#endif
+
 	if (static_branch_unlikely(&sched_numa_balancing))
 		task_tick_numa(rq, curr);
+
+#ifdef CONFIG_GPFS_RESCHED_TASK_AT_TARGET
+	/* current task reach at the target. 
+	 * when rq->cfs.nr_running > 1 => schedule one of other tasks that do not reach the target. 
+	 *	                              If all tasks reach the target, call target_vruntime_balance().
+	 * when rq->cfs.nr_running == 1 => call target_vruntime_balance() */
+	if (unlikely(vruntime_passed(curr->se.vruntime, rq->cfs.target_vruntime))) {
+		resched_curr(rq);
+		clear_buddies(task_cfs_rq(curr), &curr->se);
+		return;
+	}
+#else /* !CONFIG_GPFS_RESCHED_TASK_AT_TARGET */
+	if (unlikely(vruntime_passed(real_min_vruntime(&rq->cfs), rq->cfs.target_vruntime))) {
+		resched_curr(rq);
+		clear_buddies(task_cfs_rq(curr), &curr->se);
+		return;
+	}
+#endif /* !CONFIG_GPFS_RESCHED_TASK_AT_TARGET */
 }
 
 /*
@@ -8165,6 +12001,9 @@ static void task_fork_fair(struct task_struct *p)
 	if (curr)
 		se->vruntime = curr->vruntime;
 	place_entity(cfs_rq, se, 1);
+#ifdef CONFIG_GPFS
+	account_start_debit(cfs_rq, se);
+#endif
 
 	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
 		/*
@@ -8175,7 +12014,13 @@ static void task_fork_fair(struct task_struct *p)
 		resched_curr(rq);
 	}
 
+#ifndef CONFIG_GPFS	/* for GPFS, do not normalize vruntime based on min_vruntime */
 	se->vruntime -= cfs_rq->min_vruntime;
+#endif /* !CONFIG_GPFS */
+#ifdef CONFIG_GPFS_PRINTK_AT_FORK_AND_EXIT
+	pr_err("[%s] pid: %5d comm: %20s vruntmie: %16lld sum_exec: %16lld\n",
+			__func__, p->pid, p->comm, se->vruntime, se->sum_exec_runtime);
+#endif
 
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
@@ -8234,6 +12079,7 @@ static void detach_task_cfs_rq(struct task_struct *p)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
+#ifndef CONFIG_GPFS /* for GPFS, do not normalize vruntime while detaching */
 	if (!vruntime_normalized(p)) {
 		/*
 		 * Fix up our vruntime so that the current sleep doesn't
@@ -8242,9 +12088,13 @@ static void detach_task_cfs_rq(struct task_struct *p)
 		place_entity(cfs_rq, se, 0);
 		se->vruntime -= cfs_rq->min_vruntime;
 	}
+#endif /* !CONFIG_GPFS */
 
 	/* Catch up with the cfs_rq and remove our load when we leave */
 	detach_entity_load_avg(cfs_rq, se);
+#ifdef CONFIG_GPFS
+	update_tg_load_sum(se, cfs_rq->tg, se->load.weight, 0, TG_LOAD_SUM_DETACH);
+#endif
 }
 
 static void attach_task_cfs_rq(struct task_struct *p)
@@ -8262,9 +12112,14 @@ static void attach_task_cfs_rq(struct task_struct *p)
 
 	/* Synchronize task with its cfs_rq */
 	attach_entity_load_avg(cfs_rq, se);
+#ifdef CONFIG_GPFS
+	update_tg_load_sum(se, cfs_rq->tg, 0, se->load.weight, TG_LOAD_SUM_ATTACH);
+#endif
 
+#if !defined(CONFIG_GPFS) /* for GPFS, do not normalize vruntime base on min_vruntime */
 	if (!vruntime_normalized(p))
 		se->vruntime += cfs_rq->min_vruntime;
+#endif /* !CONFIG_GPFS */
 }
 
 static void switched_from_fair(struct rq *rq, struct task_struct *p)
@@ -8305,6 +12160,9 @@ static void set_curr_task_fair(struct rq *rq)
 		/* ensure bandwidth has been allocated on our new cfs_rq */
 		account_cfs_rq_runtime(cfs_rq, 0);
 	}
+#ifdef CONFIG_GPFS_AMP
+	set_curr_effi(rq->curr);
+#endif
 }
 
 void init_cfs_rq(struct cfs_rq *cfs_rq)
@@ -8314,6 +12172,13 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 #ifndef CONFIG_64BIT
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
 #endif
+#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+	cfs_rq->real_min_vruntime = (u64)(-(1LL << 20));
+#ifndef CONFIG_64BIT
+	cfs_rq->real_min_vruntime_copy = cfs_rq->real_min_vruntime;
+#endif
+#endif
+	cfs_rq->lagged_weight = 0;
 #ifdef CONFIG_SMP
 	atomic_long_set(&cfs_rq->removed_load_avg, 0);
 	atomic_long_set(&cfs_rq->removed_util_avg, 0);
@@ -8363,7 +12228,11 @@ int alloc_fair_sched_group(struct task_group *tg, struct task_group *parent)
 	if (!tg->se)
 		goto err;
 
+#ifdef CONFIG_GPFS_LARGE_GROUP_SHARES
+	tg->shares = NICE_0_LOAD * num_possible_cpus();
+#else
 	tg->shares = NICE_0_LOAD;
+#endif
 
 	init_cfs_bandwidth(tg_cfs_bandwidth(tg));
 
@@ -8449,6 +12318,30 @@ void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
 
 static DEFINE_MUTEX(shares_mutex);
 
+#ifdef CONFIG_GPFS
+static void __sched_group_set_shares(struct task_group *tg, unsigned long old, unsigned long new) 
+{
+	unsigned long ret;
+
+	if (!tg->parent)
+		return;
+
+	/* lock the load_sum not to be 0 */
+	ret = atomic_long_add_return(1, &tg->load_sum);
+	if (ret == 1) /* load_sum was zero */
+		__update_tg_load_sum(tg->parent, 0, new);
+	else /*	load_sum was not zero */
+		__update_tg_load_sum(tg->parent, old, new);
+
+	tg->shares = new;
+
+	ret = atomic_long_sub_return(1, &tg->load_sum);
+	if (ret == 0) /* load_sum is now 0 */
+		__update_tg_load_sum(tg->parent, new, 0);
+
+}
+#endif
+
 int sched_group_set_shares(struct task_group *tg, unsigned long shares)
 {
 	int i;
@@ -8466,7 +12359,14 @@ int sched_group_set_shares(struct task_group *tg, unsigned long shares)
 	if (tg->shares == shares)
 		goto done;
 
+#ifdef CONFIG_GPFS
+	/* update load_sum of parent */
+	__sched_group_set_shares(tg, tg->shares, shares);
+#else
 	tg->shares = shares;
+#endif
+
+
 	for_each_possible_cpu(i) {
 		struct rq *rq = cpu_rq(i);
 		struct sched_entity *se;
@@ -8593,14 +12493,22 @@ void show_numa_stats(struct task_struct *p, struct seq_file *m)
 
 __init void init_sched_fair_class(void)
 {
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	int type;
+#endif
 #ifdef CONFIG_SMP
 	open_softirq(SCHED_SOFTIRQ, run_rebalance_domains);
 
 #ifdef CONFIG_NO_HZ_COMMON
 	nohz.next_balance = jiffies;
 	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
+#ifdef CONFIG_GPFS_AMP_NO_HZ
+	for_each_type(type) {
+		zalloc_cpumask_var(&nohz.idle_cpus_mask_type[type], GFP_NOWAIT);
+	}
+#endif
 	cpu_notifier(sched_ilb_notifier, 0);
 #endif
 #endif /* SMP */
-
+	__debug_lagged_diff(-1, NULL, 0);
 }

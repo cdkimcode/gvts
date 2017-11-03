@@ -93,6 +93,9 @@ void nmi_panic(struct pt_regs *regs, const char *msg)
 }
 EXPORT_SYMBOL(nmi_panic);
 
+#ifdef CONFIG_GPFS
+void dump_sched(void);
+#endif
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
@@ -148,8 +151,12 @@ void panic(const char *fmt, ...)
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
 	 */
-	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1)
+	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1) {
 		dump_stack();
+#ifdef CONFIG_GPFS
+		dump_sched();
+#endif
+	}
 #endif
 
 	/*

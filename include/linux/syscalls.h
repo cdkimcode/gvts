@@ -898,4 +898,8 @@ asmlinkage long sys_copy_file_range(int fd_in, loff_t __user *off_in,
 
 asmlinkage long sys_mlock2(unsigned long start, size_t len, int flags);
 
+#ifdef CONFIG_GPFS_SYSCALL
+asmlinkage long sys_fairamp(int op, int id, u64 num, void __user *vars);
+#endif
+
 #endif

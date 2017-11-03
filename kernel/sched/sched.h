@@ -36,6 +36,36 @@ extern void update_cpu_load_active(struct rq *this_rq);
 static inline void update_cpu_load_active(struct rq *this_rq) { }
 #endif
 
+#ifdef CONFIG_GPFS
+/* refer to max_vruntime() */
+#define vruntime_passed(min_vruntime, target_vruntime) \
+			((s64)((min_vruntime) - (target_vruntime)) >= 0)
+/* ne = not equal */
+#define vruntime_passed_ne(min_vruntime, target_vruntime) \
+			((s64)((min_vruntime) - (target_vruntime)) > 0)
+#define vruntime_diff(min_vruntime, target_vruntime) \
+			((s64)((min_vruntime) - (target_vruntime)))
+
+#define TG_LOAD_SUM_SLEEP 0x1
+#define TG_LOAD_SUM_WAKEUP 0x2
+#define TG_LOAD_SUM_DETACH 0x4
+#define TG_LOAD_SUM_ATTACH 0x8
+#define TG_LOAD_SUM_CHANGE 0x10
+#endif
+
+#ifdef CONFIG_GPFS_AMP
+#define for_each_type(type) \
+			for (type = 0; type < NUM_CPU_TYPES; type++)
+
+/* for task->effi_mode */
+#define EFFICIENCY_NOT_INIT 0 /* need to initialize */
+#define	EFFICIENCY_DEFAULT  1 /* default efficiency */
+#define EFFICIENCY_STATIC   2 /* set by syscall */
+#define EFFICIENCY_ESTIMATE 3 /* estimated */
+
+extern __read_mostly unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES];
+#endif /* CONFIG_GPFS_AMP */
+
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
  */
@@ -255,8 +285,11 @@ struct task_group {
 	 * will also be accessed at each tick.
 	 */
 	atomic_long_t load_avg ____cacheline_aligned;
-#endif
-#endif
+#ifdef CONFIG_GPFS
+	atomic_long_t load_sum ____cacheline_aligned; /* this is also heavily contended at clock tick time */
+#endif /* CONFIG_GPFS */
+#endif /* CONFIG_SMP */
+#endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_RT_GROUP_SCHED
 	struct sched_rt_entity **rt_se;
@@ -366,6 +399,29 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64 min_vruntime_copy;
 #endif
+#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+	u64 real_min_vruntime; /* can go backward */
+#ifndef CONFIG_64BIT
+	u64 real_min_vruntime_copy;
+#endif
+#endif
+#ifdef CONFIG_GPFS
+	u64 target_vruntime; /* cache of rq->sd_vruntime->target */
+	u64 target_interval; /* cache of rq->sd_vruntime->interval */
+	enum cfs_rq_state {
+		CFS_RQ_UNINITIALIZED = 0, /* default value */
+		CFS_RQ_WAS_IDLE = 1,
+		CFS_RQ_WAS_BUSY = 2
+		} was_idle;
+	u64 idle_start;
+	
+	/* TODO: actually the following two things are used only 
+	 * in the first level of cfs_rqs. To save memory, move these
+	 * into rq structure.
+	 */
+	s64 lagged;
+	unsigned long lagged_weight;
+#endif /* CONFIG_GPFS */
 
 	struct rb_root tasks_timeline;
 	struct rb_node *rb_leftmost;
@@ -430,8 +486,16 @@ struct cfs_rq {
 
 	u64 throttled_clock, throttled_clock_task;
 	u64 throttled_clock_task_time;
+#ifdef CONFIG_GPFS_NORMAL_V2
+	u64 throttled_target;
+#endif
 	int throttled, throttle_count;
 	struct list_head throttled_list;
+
+#ifdef CONFIG_GPFS_BANDWIDTH
+	struct list_head state_q[2];
+	struct list_head *active_q, *thrott_q;
+#endif /* CONFIG_GPFS_BANDWIDTH */
 #endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 };
@@ -563,6 +627,39 @@ extern struct root_domain def_root_domain;
 
 #endif /* CONFIG_SMP */
 
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+enum src_active_mode {
+SRC_ACTIVE_NOT_INIT,
+SRC_ACTIVE_TRY,
+SRC_ACTIVE_QUEUE,
+SRC_ACTIVE_QUEUE_DONE,
+SRC_ACTIVE_BALANCE_START,
+SRC_ACTIVE_BALANCE_CONDITION,
+SRC_ACTIVE_BALANCE_DETACH,
+SRC_ACTIVE_BALANCE_DETACH_END,
+SRC_ACTIVE_BALANCE_ATTACH,
+SRC_ACTIVE_BALANCE_ATTACH_END,
+SRC_ACTIVE_BALANCE_RETURN,
+SRC_ACTIVE_STOP_QUEUE_START,
+SRC_ACTIVE_STOP_QUEUE_END,
+SRC_ACTIVE_TTWU_START,
+SRC_ACTIVE_TTWU_START2,
+SRC_ACTIVE_TTWU_START3,
+SRC_ACTIVE_TTWU_START4,
+SRC_ACTIVE_TTWU_START5,
+SRC_ACTIVE_TTWU_START6,
+SRC_ACTIVE_CALL_TTWU_QUEUE,
+SRC_ACTIVE_RETURN_TTWU_QUEUE,
+SRC_ACTIVE_TTWU_QUEUE_START,
+SRC_ACTIVE_TTWU_QUEUE_END,
+SRC_ACTIVE_CALL_TTWU_DO_ACTIVATE,
+SRC_ACTIVE_RETURN_TTWU_DO_ACTIVATE,
+SRC_ACTIVE_CALL_TTWU_ACTIVATE,
+SRC_ACTIVE_CALL_TTWU_DO_WAKEUP,
+SRC_ACTIVE_RETURN_TTWU_DO_WAKEUP
+};
+#endif /* CONFIG_DEBUG_SRC_ACTIVE */
+
 /*
  * This is the main, per-CPU runqueue data structure.
  *
@@ -574,6 +671,9 @@ struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t lock;
 
+#ifdef CONFIG_GPFS_AMP
+	int cpu_type;
+#endif
 	/*
 	 * nr_running and cpu_load should be in the same cacheline because
 	 * remote CPUs use both these fields when doing load calculation.
@@ -628,6 +728,12 @@ struct rq {
 #ifdef CONFIG_SMP
 	struct root_domain *rd;
 	struct sched_domain *sd;
+#ifdef CONFIG_GPFS
+	struct sd_vruntime *sd_vruntime;
+#endif
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+	int infeasible_weight;
+#endif
 
 	unsigned long cpu_capacity;
 	unsigned long cpu_capacity_orig;
@@ -639,6 +745,9 @@ struct rq {
 	int active_balance;
 	int push_cpu;
 	struct cpu_stop_work active_balance_work;
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	volatile int src_active_mode; /* DEBUG_ACTIVE */
+#endif
 	/* cpu of this runqueue: */
 	int cpu;
 	int online;
@@ -693,6 +802,29 @@ struct rq {
 	unsigned int ttwu_count;
 	unsigned int ttwu_local;
 #endif
+
+#ifdef CONFIG_GPFS_STATS
+	unsigned int largest_idle_min_vruntime_racing;
+	unsigned int nr_idle_balance_works;
+	/* target_vruntime_balance() stats */
+	unsigned int tvb_count[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_fast_path[CPU_MAX_IDLE_TYPES];
+	/* select_task_rq_fair() stats */
+	unsigned int select_fail;
+	unsigned int select_idle;
+	unsigned int select_busy;
+	/* source activated target vruntime balancing */
+	unsigned int satb_cond; /* satisfy the condition */
+	unsigned int satb_try; /* success to try to run the stop thread */
+	unsigned int satb_run; /* stop thread start to run the source activated balancing. */
+	unsigned int satb_count; /* we found a destination runqueue. */ 
+	unsigned int satb_pushed; /* actually pushed to the destination runqueue. */
+	/* get_min_target() stats */
+	unsigned int get_traverse_rq_count;
+	unsigned int get_traverse_child_count;
+	/* GPFS_BANDWIDTH */
+	unsigned int iterate_thrott_q;
+#endif /* CONFIG_GPFS_STATS */
 
 #ifdef CONFIG_SMP
 	struct llist_head wake_list;
@@ -884,6 +1016,35 @@ struct sched_group {
 	 */
 	unsigned long cpumask[0];
 };
+
+#ifdef CONFIG_GPFS
+struct sd_vruntime {
+	atomic_t updated_by; /* cpu id who updates the target */
+	atomic64_t target;
+	/* the following variables are __read_mostly, 
+	 * but this placement results in prefetch effect. */
+	u64 interval; /* how much target_vruntime will be inremented for each round */
+	u64 tolerance;
+	atomic_t ref; /* for initialization */
+	struct sd_vruntime *next;
+	struct sd_vruntime *parent;
+	struct sd_vruntime *child;
+#if CONFIG_GPFS_MIN_TARGET
+	atomic64_t min_target;
+	atomic64_t min_child; /* struct rq for level-0, struct sd_vruntime otherwise. */
+#endif
+	/* used only when busy-to-idle or idle-to-busy transition time */
+	atomic64_t largest_idle_min_vruntime;
+	atomic_t nr_busy; /* the number of busy cpus in this domain */
+	unsigned long span[0]; /* The CPUs this domain covers. [variable length] */
+}; 
+
+static inline struct cpumask *sd_vruntime_span(struct sd_vruntime *sdv)
+{
+	return to_cpumask(sdv->span);
+}
+
+#endif
 
 static inline struct cpumask *sched_group_cpus(struct sched_group *sg)
 {

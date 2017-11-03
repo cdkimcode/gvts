@@ -5,6 +5,19 @@
 
 #include <linux/sched/prio.h>
 
+#ifdef CONFIG_GPFS_AMP
+#define NUM_CPU_TYPES CONFIG_GPFS_NUM_CPU_TYPES
+#if CONFIG_GPFS_BASE_CPU_TYPE >= CONFIG_GPFS_NUM_CPU_TYPES
+ERROR "CONFIG_GPFS_BASE_CPU_TYPE should be smaller than CONFIG_GPFS_NUM_CPU_TYPES"
+#endif
+#else /* !CONFIG_GPFS_AMP */
+#define NUM_CPU_TYPES 2 /* default value for 'gpfs' binary */
+#endif
+
+#ifdef CONFIG_GPFS_STATS
+#define NUM_MAX_TARGET_DIFF 10
+#endif
+
 
 struct sched_param {
 	int sched_priority;
@@ -1041,6 +1054,11 @@ struct sched_domain {
 	struct sched_domain *parent;	/* top domain must be null terminated */
 	struct sched_domain *child;	/* bottom domain must be null terminated */
 	struct sched_group *groups;	/* the balancing groups of the domain */
+#ifdef CONFIG_GPFS
+	struct sd_vruntime *vruntime; /* the balancing criteria of GPFS */
+	u64 vruntime_interval;
+	u64 vruntime_tolerance;
+#endif /* CONFIG_GPFS */
 	unsigned long min_interval;	/* Minimum balance interval ms */
 	unsigned long max_interval;	/* Maximum balance interval ms */
 	unsigned int busy_factor;	/* less balancing by factor if busy */
@@ -1067,6 +1085,51 @@ struct sched_domain {
 	unsigned long next_decay_max_lb_cost;
 
 #ifdef CONFIG_SCHEDSTATS
+#ifdef CONFIG_GPFS_STATS
+	/* _target_vruntime_balance() */
+	unsigned int target_update_racing;
+	/* __target_vruntime_balance() */
+	unsigned int tb_count[CPU_MAX_IDLE_TYPES];
+	unsigned int tb_nolaggedgroup[CPU_MAX_IDLE_TYPES];
+	unsigned int tb_nolaggedcpu[CPU_MAX_IDLE_TYPES];
+	unsigned int tb_gained[CPU_MAX_IDLE_TYPES];
+	unsigned int tb_all_pinned_but_running[CPU_MAX_IDLE_TYPES];
+	/* _target_vruntime_balance() */
+	unsigned int tvb_count[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_not_reach[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_idle_continue[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_stay[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_not_update[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_update_target[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_pull_count[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_pull_gained[CPU_MAX_IDLE_TYPES];
+	unsigned int tvb_pull_no_gain[CPU_MAX_IDLE_TYPES];
+	/* find_most_lagged_cpu() */
+	unsigned int lagged_count[CPU_MAX_IDLE_TYPES];
+	unsigned int lagged_little_tasks[CPU_MAX_IDLE_TYPES];
+	unsigned int lagged_no_cfs_tasks[CPU_MAX_IDLE_TYPES];
+	unsigned int lagged_pass_soon[CPU_MAX_IDLE_TYPES];
+	unsigned int lagged_not_min[CPU_MAX_IDLE_TYPES];
+	unsigned int lagged_found[CPU_MAX_IDLE_TYPES];
+	/* detach_lagged_tasks() */
+	unsigned int detach_count[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_neg_diff[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_loop_stop[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_count[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_cannot[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_not_lag[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_too_lag[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_complete[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_detach[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_too_detach[CPU_MAX_IDLE_TYPES];
+	unsigned int detach_task_not_detach[CPU_MAX_IDLE_TYPES];
+	unsigned int atb_count;
+	unsigned int atb_failed;
+	unsigned int atb_pushed;
+	unsigned int atb_pushed_under;
+	unsigned int target_diff[NUM_MAX_TARGET_DIFF];
+#endif /* CONFIG_GPFS_STATS */
+
 	/* load_balance() stats */
 	unsigned int lb_count[CPU_MAX_IDLE_TYPES];
 	unsigned int lb_failed[CPU_MAX_IDLE_TYPES];
@@ -1139,6 +1202,9 @@ struct sd_data {
 	struct sched_domain **__percpu sd;
 	struct sched_group **__percpu sg;
 	struct sched_group_capacity **__percpu sgc;
+#ifdef CONFIG_GPFS
+	struct sd_vruntime **__percpu sdv;
+#endif
 };
 
 struct sched_domain_topology_level {
@@ -1218,6 +1284,10 @@ struct sched_avg {
 	unsigned long load_avg, util_avg;
 };
 
+#ifdef CONFIG_GPFS
+struct remember_info;
+#endif
+
 #ifdef CONFIG_SCHEDSTATS
 struct sched_statistics {
 	u64			wait_start;
@@ -1262,8 +1332,27 @@ struct sched_entity {
 
 	u64			exec_start;
 	u64			sum_exec_runtime;
-	u64			vruntime;
 	u64			prev_sum_exec_runtime;
+	u64			vruntime;
+#ifdef CONFIG_GPFS_AMP
+	u64			sum_perf_runtime;
+	u32			vruntime_rem;
+	u32			perf_rem;
+	u64			sum_type_runtime[NUM_CPU_TYPES];
+#endif /* CONFIG_GPFS_AMP */
+#ifdef CONFIG_GPFS
+	u64			sleep_start; /* remember the sleep start time
+								to prevent vruntime normalization for short sleep */
+#ifdef CONFIG_GPFS_NORMAL_V2
+	u64			sleep_target; /* remember the target when start to sleep
+	                             for vruntime normalization */
+#endif /* CONFIG_GPFS_NORMAL_V2 */
+#endif /* CONFIG_GPFS_AMP */
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION /* for debug */
+	unsigned int num_normalization;
+	u64 added_normalization;
+	u64 max_added_normalization;
+#endif
 
 	u64			nr_migrations;
 
@@ -1278,7 +1367,12 @@ struct sched_entity {
 	struct cfs_rq		*cfs_rq;
 	/* rq "owned" by this entity/group: */
 	struct cfs_rq		*my_q;
+#ifdef CONFIG_GPFS_BANDWIDTH
+	struct list_head	*state_q; /* refer to active_q or throt_q.
+									NULL while running */
+	struct list_head	state_node; /* node inserted to active_q or throt_q */ 
 #endif
+#endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_SMP
 	/*
@@ -1289,6 +1383,23 @@ struct sched_entity {
 	 */
 	struct sched_avg	avg ____cacheline_aligned_in_smp;
 #endif
+#ifdef CONFIG_GPFS
+	struct load_weight eff_load;	/* for vruntime update */
+	struct sched_entity *curr_child; /* for update effective_load */
+	unsigned long eff_weight_real; /* NOT affected by MIN_SHARES and MAX_SHARES */
+	unsigned long lagged_weight; /* To calculcate @lagged.
+									eff_weight_real * util_avg >> SCALE
+									or 
+									eff_weight_real * util_avg << ADDED_BITS / efficiency[rq->cpu_type]
+									*/
+#ifdef CONFIG_GPFS_AMP
+	unsigned long *effi; /* a pointer to task->effi related to this se */
+	unsigned long __lagged_weight[NUM_CPU_TYPES]; /* lagged_weight for each type */
+#endif
+	s64 lagged; /* necessary time to reach se->vruntime to lagged_target */
+	u64 lagged_target; /* target used when calculating @lagged. */
+	unsigned long tg_load_sum_contrib;
+#endif /* CONFIG_GPFS */
 };
 
 struct sched_rt_entity {
@@ -1408,6 +1519,11 @@ struct task_struct {
 	int wake_cpu;
 #endif
 	int on_rq;
+#ifdef CONFIG_GPFS_AMP
+	int effi_mode;
+	unsigned long __effi[NUM_CPU_TYPES]; /* set by users or estimations */
+	unsigned long effi[NUM_CPU_TYPES]; /* normalized value of __efficiency */
+#endif
 
 	int prio, static_prio, normal_prio;
 	unsigned int rt_priority;
@@ -1462,7 +1578,8 @@ struct task_struct {
 #if defined(SPLIT_RSS_COUNTING)
 	struct task_rss_stat	rss_stat;
 #endif
-/* task state */
+
+	/* task state */
 	int exit_state;
 	int exit_code, exit_signal;
 	int pdeath_signal;  /*  The signal sent when the parent dies  */
@@ -1496,6 +1613,9 @@ struct task_struct {
 
 	pid_t pid;
 	pid_t tgid;
+#ifdef CONFIG_GPFS
+	struct remember_info *remember;
+#endif
 
 #ifdef CONFIG_CC_STACKPROTECTOR
 	/* Canary value for the -fstack-protector gcc feature */

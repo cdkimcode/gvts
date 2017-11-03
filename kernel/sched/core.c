@@ -111,6 +111,397 @@ void update_rq_clock(struct rq *rq)
 	update_rq_clock_task(rq, delta);
 }
 
+#ifdef CONFIG_GPFS_AMP
+#if NUM_CPU_TYPES == 2
+unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES] = {1024, 1703};
+#else
+ERROR "DEFAULT_EFFICIENCY is not defined."
+#endif
+
+#if CONFIG_GPFS_BASE_CPU_TYPE == -1 /* fair share base */
+
+static __read_mostly atomic_t num_cpus_type_ver = {0}; /* odd: changing, even: stable */
+static __read_mostly atomic_t num_cpus_type[NUM_CPU_TYPES];
+
+static void __init init_rq_cpu_type(struct rq *rq)
+{
+	rq->cpu_type = 0; /* default type */
+	atomic_inc(&num_cpus_type_ver);
+	atomic_inc(&num_cpus_type[0]);
+	atomic_inc(&num_cpus_type_ver);
+}
+
+static void __set_rq_cpu_type(struct rq *rq, int new) 
+{
+	atomic_inc(&num_cpus_type_ver); /* now, odd: changing... */
+	smp_mb();
+	atomic_inc(&num_cpus_type[new]);
+	atomic_dec(&num_cpus_type[rq->cpu_type]);
+	rq->cpu_type = new;
+	smp_mb();
+	atomic_inc(&num_cpus_type_ver); /* now, even; stable... */
+	smp_mb();
+}
+#else /* CONFIG_GPFS_BASE_CPU_TYPE >= 0 */
+static inline void __init init_rq_cpu_type(struct rq *rq) { rq->cpu_type = 0; }
+static inline void __set_rq_cpu_type(struct rq *rq, int new) { rq->cpu_type = new; }
+#endif /* CONFIG_GPFS_BASE_CPU_TYPE >= 0 */
+static void set_rq_cpu_type(struct rq *rq, int type)
+{
+	if (rq->cpu_type == type)
+		return;
+	raw_spin_lock(&rq->lock);
+	__set_rq_cpu_type(rq, type);
+	raw_spin_unlock(&rq->lock);
+}
+
+static int get_rq_cpu_type(struct rq *rq)
+{
+	return rq->cpu_type;
+}
+
+/* Update p->effi[] based on p->__effi[] */
+void normalize_efficiency(struct task_struct *p)
+{
+	unsigned long base;
+	int type;
+#if CONFIG_GPFS_BASE_CPU_TYPE >= 0
+	base = p->__effi[CONFIG_GPFS_BASE_CPU_TYPE];
+#else /* CONFIG_GPFS_BASE_CPU_TYPE == -1, that is, fair share base */
+	int num_cpus, num_cpus_total = 0;
+	int version;
+
+again:	
+	version = atomic_read(&num_cpus_type_ver);
+	if (unlikely(version % 2 == 1))
+		goto again;
+	
+	base = 0;
+	for_each_type(type) {
+		num_cpus = atomic_read(&num_cpus_type[type]);
+		base += p->__effi[type] * num_cpus;
+		num_cpus_total += num_cpus;
+	}
+
+	if (unlikely(version != atomic_read(&num_cpus_type_ver)))
+		goto again;
+printk(KERN_ERR "num_cpus_total: %d num_cpus_type_ver: %d base: %ld __effi: %ld %ld\n", 
+					num_cpus_total, version, base,
+					p->__effi[0], p->__effi[1]);
+	if (unlikely(!num_cpus_total))
+		num_cpus_total = 1;
+	base = (base + (num_cpus_total >> 1)) / num_cpus_total;
+#endif /* CONFIG_GPFS_BASE_CPU_TYPE == -1 */
+	if (unlikely(!base))
+		base = 1024;
+	for_each_type(type)
+		p->effi[type] = p->__effi[type] << SCHED_LOAD_SHIFT / base;
+}
+
+#define __set_efficiency_mode(p, mode, effi) do {					\
+			int type;										\
+			(p)->effi_mode = mode;			\
+			for_each_type(type)								\
+				(p)->__effi[type] = (effi)[type];	\
+			normalize_efficiency(p);						\
+		} while(0)
+
+#define set_efficiency_default(p) __set_efficiency_mode(p, EFFICIENCY_DEFAULT, DEFAULT_EFFICIENCY)
+
+#endif /* CONFIG_GPFS_AMP */
+
+#ifdef CONFIG_GPFS
+/* remember tasks and related things */
+struct task_runtime_info {
+	u64 sum_exec_runtime;
+	/* below two are meaningless if CONFIG_GPFS_AMP is not defined */
+	u64 sum_perf_runtime;
+	u64 sum_type_runtime[NUM_CPU_TYPES];
+};
+
+struct remember_info {
+	struct remember_info *next;
+	struct remember_info *parent;
+	pid_t pid;
+	atomic_t exited; /* 0: not exited, 1: exited, 2: trying to take, 3: taken, 4: safe to delete */
+	pid_t tgid;
+	char comm[TASK_COMM_LEN];
+	u64 walltime;
+	u64 vruntime_init;
+	u64 vruntime_end;
+	u64 sum_exec_runtime;
+	/* below two are meaningless if CONFIG_GPFS_AMP is not defined */
+	u64 sum_perf_runtime;
+	u64 sum_type_runtime[NUM_CPU_TYPES];
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
+	unsigned int num_normalization;
+	u64 added_normalization;
+	u64 max_added_normalization;
+#endif
+};
+
+#if CONFIG_64BIT
+typedef s64 pointer_size_t;
+typedef atomic64_t atomic_ptr_t;
+#define atomic_ptr_set(v, new) atomic64_set(v, (long) (new))
+#define atomic_ptr_xchg(v, new) ((void *) (atomic64_xchg(v, (long) (new))))
+#define atomic_ptr_cmpxchg(v, old, new) ((void *) (atomic64_cmpxchg(v, (long) (old), (long) (new))))
+#define atomic_ptr_read(v) ((void *) (atomic64_read(v)))
+#else
+typedef s32 pointer_size_t;
+typedef atomic_t atomic_ptr_t;
+#define atomic_ptr_set(v, new) atomic_set(v, (int) (new))
+#define atomic_ptr_xchg(v, new) ((void *) (atomic_xchg(v, (int) (new))))
+#define atomic_ptr_cmpxchg(v, old, new) ((void *) (atomic_cmpxchg(v, (int) (old), (int) (new))))
+#define atomic_ptr_read(v) ((void *) (atomic_read(v)))
+#endif
+static atomic_ptr_t remember_head = {(pointer_size_t) NULL}; /* head of linked list */
+static atomic_ptr_t remember_now_taken = {(pointer_size_t) NULL}; /* not NULL while get_remembered_info is processing */
+
+static void
+__remember_task_clean(struct remember_info *head) {
+	struct remember_info *prev, *curr, *del;
+	if (atomic_ptr_cmpxchg(&remember_now_taken, NULL, head) != NULL)
+		return;
+
+	prev = head;
+	curr = head->next;
+
+	while (curr) {
+		if (atomic_cmpxchg(&curr->exited, 3, 4) != 3) {
+			prev = curr;
+			curr = curr->next;
+			continue;
+		} 
+
+		del = curr;
+		prev->next = curr->next;
+		curr = curr->next;
+
+		kfree(del);
+	}
+}
+
+/* from syscall, parent == NULL.
+   from fork(), parent != NULL. */
+static int 
+__remember_task_new(struct task_struct *p, struct task_struct *parent) 
+{
+	struct remember_info *new;
+
+	new = kzalloc(sizeof(struct remember_info), GFP_KERNEL);
+	if (!new) {
+		p->remember = NULL;
+		return -ENOMEM;
+	}
+
+	p->remember = new;
+	new->parent = parent ? parent->remember : NULL;
+	new->walltime = READ_ONCE(jiffies);
+	new->vruntime_init = p->se.vruntime; /* this is called after setting p->se.vruntime */
+	atomic_set(&new->exited, 0);
+
+	new->next = atomic_ptr_xchg(&remember_head, new);
+
+	if (new->next && atomic_read(&new->next->exited) == 3) {
+		__remember_task_clean(new);
+	}
+
+	return 0;
+}
+
+static void 
+remember_task_fork(struct task_struct *p, struct task_struct *curr) {
+	int ret;
+
+	if (!curr || !curr->remember) {
+		p->remember = NULL;
+		return;
+	}
+
+	ret = __remember_task_new(p, curr);
+	if (unlikely(ret < 0))
+		printk(KERN_ERR "%s: error: %d curr->comm: %s p->comm: %s\n", __func__, ret, curr->comm, p->comm);
+}
+
+static long remember_task_flush(void) {
+	struct remember_info *head = atomic_ptr_xchg(&remember_head, NULL);
+	struct remember_info *curr, *next, *taken_head;
+	int taken_head_passed = 0;
+
+	if (!head)
+		return 0;
+
+	taken_head = atomic_ptr_cmpxchg(&remember_now_taken, NULL, head);
+	
+	curr = head;
+	while (curr) {
+		if (curr == taken_head)
+			taken_head_passed = 1;
+
+		next = curr->next;
+		if (atomic_cmpxchg(&curr->exited, 0, 5) == 0)
+			goto next_task;
+		if (!taken_head_passed)
+			kfree(curr);
+		/* if taken_head_passed, __remember_task_clean() will free the memory */
+next_task:
+		curr = next;
+	}
+
+	if (!taken_head)
+		atomic_ptr_set(&remember_now_taken, NULL);
+	return 0;
+}
+extern void 
+remember_task_exit(struct task_struct *p) {
+	struct remember_info *info = p->remember;
+	int type;
+	unsigned long now;
+
+	if (!info)
+		return;
+
+	now = READ_ONCE(jiffies);
+	info->pid = p->pid;
+	info->tgid = p->tgid;
+	memcpy(info->comm, p->comm, TASK_COMM_LEN);
+	info->vruntime_end = p->se.vruntime;
+	info->walltime = jiffies_to_nsecs(now - (unsigned long) info->walltime);
+	info->sum_exec_runtime = p->se.sum_exec_runtime;
+#ifdef CONFIG_GPFS_AMP
+	info->sum_perf_runtime = p->se.sum_perf_runtime;
+	for_each_type(type)
+		info->sum_type_runtime[type] = p->se.sum_type_runtime[type];
+#endif
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
+	info->num_normalization = p->se.num_normalization;
+	info->added_normalization = p->se.added_normalization;
+	info->max_added_normalization = p->se.max_added_normalization;
+#endif
+	mb();
+	/* printk(KERN_ERR "task->remember->exited pid: %d comm: %s exited: %d\n",
+						info->pid, info->comm, atomic_read(&info->exited)); */
+	if (atomic_cmpxchg(&info->exited, 0, 1) == 0)
+		return;
+	
+	type = atomic_read(&info->exited);
+	if (type != 5) {
+		printk(KERN_ERR "task->remember->exited is corrupted. pid: %d comm: %s exited: %d\n",
+						info->pid, info->comm, type);
+		return;
+	}
+
+	/* exited == 5, need to free here */
+	kfree(info);
+	return;
+}
+
+static int remember_num_info(void) {
+	int ret = 0;
+	struct remember_info *head, *curr;
+
+	head = atomic_ptr_read(&remember_head);
+	if (!head)
+		return -ENOENT;
+	curr = atomic_ptr_cmpxchg(&remember_now_taken, NULL, head);
+	if (curr)
+		return -EBUSY;
+	
+	for (curr = head; curr; curr = curr->next) {
+		if (atomic_cmpxchg(&curr->exited, 1, 2) == 1)
+			ret++;
+	}
+
+	return ret;
+}
+
+
+static int get_remembered_info(int num_entry, struct remember_info *user) {
+	struct remember_info **array, *prev, *curr, *head;
+	int idx, i, num = 0;
+	int ret = 0, exited;
+	if (num_entry <= 0)
+		return -ENOENT;
+
+	head = atomic_ptr_read(&remember_now_taken);
+	if (!head)
+		return -ENOENT;
+
+	array = kzalloc(sizeof(struct remember_info *) * num_entry, GFP_KERNEL);
+	if (!array)
+		return -ENOMEM;
+
+	prev = NULL;
+	curr = head;
+	while (curr) {
+		exited = atomic_cmpxchg(&curr->exited, 2, 3);
+		//printk(KERN_ERR "%s: num: %d exited: %d\n", __func__, num, exited);
+		if (exited != 2) {
+			prev = curr;
+			curr = curr->next;
+		}
+		
+		if (num >= num_entry) {
+			ret = -EFBIG;
+			goto unlock;
+		}
+
+		array[num++] = curr;
+		if (prev) {
+			/* don't change the prev */
+			atomic_inc(&curr->exited); /* exited = 4: safe to delete */
+			prev->next = curr->next;
+			curr = curr->next;
+		} else {
+			prev = curr;
+			curr = curr->next;
+		}
+	}
+
+	atomic_ptr_set(&remember_now_taken, NULL);
+unlock:
+
+	if (ret < 0)
+		goto free;
+
+	for (idx = 0; idx < num; idx++) {
+		array[idx]->next = (struct remember_info *) (pointer_size_t) idx;
+		if (!array[idx]->parent) {
+			array[idx]->parent = (struct remember_info *) (pointer_size_t) -1;
+			goto copy;
+		}
+
+		for (i = 0; i < num; i++) {
+			if (array[idx]->parent == array[i])
+				break;
+		}
+		/* if parent have not ended yet, parent = #entries. */
+		array[idx]->parent = (struct remember_info *) (pointer_size_t) i;
+
+copy:
+		if (copy_to_user(user, array[idx], sizeof(struct remember_info))) {
+			ret = -EFAULT;
+			goto free;
+		}
+
+		user++; /* next element */
+	}
+
+	/* normal return */
+	ret = num;
+
+free:
+	for (idx = 0; idx < num; idx++) {
+		if (atomic_read(&array[idx]->exited) == 4)
+			kfree(array[idx]);
+	}
+	kfree(array);
+
+	return ret;
+}
+#endif /* CONFIG_GPFS */
+
 /*
  * Debugging: various feature bits
  */
@@ -689,10 +1080,22 @@ int tg_nop(struct task_group *tg, void *data)
 }
 #endif
 
+#ifdef CONFIG_GPFS
+void update_tg_load_sum(struct sched_entity *se, struct task_group *tg, 
+						unsigned long old, unsigned long new, 
+						int no_update_if_zero); 
+#endif
+
 static void set_load_weight(struct task_struct *p)
 {
 	int prio = p->static_prio - MAX_RT_PRIO;
 	struct load_weight *load = &p->se.load;
+#ifdef CONFIG_GPFS
+	unsigned long old_weight = load->weight;
+#endif
+#ifdef CONFIG_GPFS_AMP
+	int type;
+#endif
 
 	/*
 	 * SCHED_IDLE tasks get minimal weight:
@@ -705,6 +1108,20 @@ static void set_load_weight(struct task_struct *p)
 
 	load->weight = scale_load(sched_prio_to_weight[prio]);
 	load->inv_weight = sched_prio_to_wmult[prio];
+#ifdef CONFIG_GPFS
+	if (p->sched_class == &fair_sched_class) {
+		p->se.eff_load.weight = 0;
+		p->se.eff_load.inv_weight = 0;
+		p->se.eff_weight_real = 0;
+#ifdef CONFIG_GPFS_AMP
+		for_each_type(type)
+			p->se.__lagged_weight[type] = 0;
+#endif /* !CONFIG_GPFS_AMP */
+		p->se.lagged_weight = 0;
+		update_tg_load_sum(&p->se, p->sched_task_group, 
+				old_weight, load->weight, TG_LOAD_SUM_CHANGE);
+	}
+#endif
 }
 
 static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
@@ -1639,15 +2056,40 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
 {
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	int src_activated = rq->src_active_mode == SRC_ACTIVE_CALL_TTWU_DO_ACTIVATE ? 1 : 0;
+#endif
 	lockdep_assert_held(&rq->lock);
 
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	BUG_ON(!p);
+	BUG_ON(!rq);
+#endif
 #ifdef CONFIG_SMP
 	if (p->sched_contributes_to_load)
 		rq->nr_uninterruptible--;
 #endif
 
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
+	//	printk(KERN_ERR "call_ttwu_active cpu: %d\n", cpu_of(rq));
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_ACTIVATE;
+#endif
 	ttwu_activate(rq, p, ENQUEUE_WAKEUP | ENQUEUE_WAKING);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
+	//	printk(KERN_ERR "call_ttwu_do_wakeup cpu: %d\n", cpu_of(rq));
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_DO_WAKEUP;
+#endif
 	ttwu_do_wakeup(rq, p, wake_flags);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
+	//	printk(KERN_ERR "ret_ttwu_do_wakeup cpu: %d\n", cpu_of(rq));
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_RETURN_TTWU_DO_WAKEUP;
+#endif
 }
 
 /*
@@ -1662,6 +2104,7 @@ static int ttwu_remote(struct task_struct *p, int wake_flags)
 	int ret = 0;
 
 	rq = __task_rq_lock(p);
+
 	if (task_on_rq_queued(p)) {
 		/* check_preempt_curr() may use rq clock */
 		update_rq_clock(rq);
@@ -1780,6 +2223,9 @@ bool cpus_share_cache(int this_cpu, int that_cpu)
 static void ttwu_queue(struct task_struct *p, int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	int src_activated = rq->src_active_mode == SRC_ACTIVE_CALL_TTWU_QUEUE ? 1 : 0; 
+#endif
 
 #if defined(CONFIG_SMP)
 	if (sched_feat(TTWU_QUEUE) && !cpus_share_cache(smp_processor_id(), cpu)) {
@@ -1788,12 +2234,27 @@ static void ttwu_queue(struct task_struct *p, int cpu)
 		return;
 	}
 #endif
-
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_TTWU_QUEUE_START;
+#endif
 	raw_spin_lock(&rq->lock);
 	lockdep_pin_lock(&rq->lock);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_DO_ACTIVATE;
+#endif
 	ttwu_do_activate(rq, p, 0);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_RETURN_TTWU_DO_ACTIVATE;
+#endif
 	lockdep_unpin_lock(&rq->lock);
 	raw_spin_unlock(&rq->lock);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activated)
+		rq->src_active_mode = SRC_ACTIVE_TTWU_QUEUE_END;
+#endif
 }
 
 /*
@@ -1907,6 +2368,11 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 {
 	unsigned long flags;
 	int cpu, success = 0;
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	int src_activate = task_rq(p)->src_active_mode == SRC_ACTIVE_QUEUE ? 1 : 0;
+	if (src_activate)
+		task_rq(p)->src_active_mode = SRC_ACTIVE_TTWU_START;
+#endif	
 
 	/*
 	 * If we are going to wake up a thread waiting for CONDITION we
@@ -1923,11 +2389,19 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	success = 1; /* we're going to change ->state */
 	cpu = task_cpu(p);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START2;
+#endif	
 
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
 #ifdef CONFIG_SMP
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START3;
+#endif	
 	/*
 	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
 	 * possible to, falsely, observe p->on_cpu == 0.
@@ -1961,17 +2435,38 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START4;
+#endif	
 	if (p->sched_class->task_waking)
 		p->sched_class->task_waking(p);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START5;
+#endif	
 
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	/* DEBUG */ BUG_ON(cpu < 0 || cpu > 15);
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START6;
+#endif
 	if (task_cpu(p) != cpu) {
 		wake_flags |= WF_MIGRATED;
 		set_task_cpu(p, cpu);
 	}
 #endif /* CONFIG_SMP */
 
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_CALL_TTWU_QUEUE;
+#endif	
 	ttwu_queue(p, cpu);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (src_activate)
+		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_RETURN_TTWU_QUEUE;
+#endif	
 stat:
 	if (schedstat_enabled())
 		ttwu_stat(p, cpu, wake_flags);
@@ -2042,6 +2537,9 @@ out:
  */
 int wake_up_process(struct task_struct *p)
 {
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	/* DEBUG */ BUG_ON(!p);
+#endif
 	return try_to_wake_up(p, TASK_NORMAL, 0);
 }
 EXPORT_SYMBOL(wake_up_process);
@@ -2076,23 +2574,71 @@ void __dl_clear_params(struct task_struct *p)
  */
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
+#ifdef CONFIG_GPFS_AMP
+	struct task_struct *curr = current;
+#endif
+#ifdef CONFIG_GPFS_AMP
+	int type;
+#endif
+
 	p->on_rq			= 0;
 
 	p->se.on_rq			= 0;
+#ifdef CONFIG_GPFS
+	p->se.eff_load.weight = 0; /* Not yet set. This is context dependent value. */
+	p->se.eff_load.inv_weight = 0;
+	p->se.curr_child = NULL; /* always NULL for leaf sched_entity */
+	p->se.eff_weight_real = 0;
+#ifdef CONFIG_GPFS_AMP
+	if (curr && curr->effi_mode) {
+		p->effi_mode = curr->effi_mode;
+		for_each_type(type)
+			p->__effi[type] = curr->__effi[type];
+		for_each_type(type)
+			p->effi[type] = curr->effi[type];
+	} else /* curr == NULL or curr->effi_mode == EFFICIENCY_NOT_INIT */
+		set_efficiency_default(p);
+
+	p->se.effi = p->effi;
+	for_each_type(type)
+		p->se.__lagged_weight[type] = 0;
+#endif /* CONFIG_GPFS_AMP */
+	p->se.lagged_weight = 0;
+#endif /* CONFIG_GPFS */
 	p->se.exec_start		= 0;
 	p->se.sum_exec_runtime		= 0;
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
+#ifdef CONFIG_GPFS_AMP
+	p->se.sum_perf_runtime = 0;
+	p->se.vruntime_rem = 0;
+	p->se.perf_rem = 0;
+	for_each_type(type)
+		p->se.sum_type_runtime[type] = 0;
+#endif /* CONFIG_GPFS_AMP */
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	p->se.cfs_rq			= NULL;
-#endif
+#ifdef CONFIG_GPFS_BANDWIDTH
+	p->se.state_q = NULL;
+	INIT_LIST_HEAD(&p->se.state_node);
+#endif /* CONFIG_GPFS_BANDWIDTH */
+#endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_SCHEDSTATS
 	/* Even if schedstat is disabled, there should not be garbage */
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
+#endif
+
+#ifdef CONFIG_GPFS
+	p->se.tg_load_sum_contrib = 0;
+#endif
+#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
+	p->se.num_normalization = 0;
+	p->se.added_normalization = 0;
+	p->se.max_added_normalization = 0;
 #endif
 
 	RB_CLEAR_NODE(&p->dl.rb_node);
@@ -2168,6 +2714,7 @@ int sysctl_numa_balancing(struct ctl_table *table, int write,
 #endif
 
 DEFINE_STATIC_KEY_FALSE(sched_schedstats);
+static bool __initdata __sched_schedstats = false;
 
 #ifdef CONFIG_SCHEDSTATS
 static void set_schedstats(bool enabled)
@@ -2191,12 +2738,16 @@ static int __init setup_schedstats(char *str)
 	int ret = 0;
 	if (!str)
 		goto out;
-
+	/*
+	 * This code is called before jump labels have been set up, so we can't
+	 * change the static branch directly just yet.  Instead set a temporary
+	 * variable so init_schedstats() can do it later.
+	 */
 	if (!strcmp(str, "enable")) {
-		set_schedstats(true);
+		__sched_schedstats = true;
 		ret = 1;
 	} else if (!strcmp(str, "disable")) {
-		set_schedstats(false);
+		__sched_schedstats = false;
 		ret = 1;
 	}
 out:
@@ -2206,6 +2757,11 @@ out:
 	return ret;
 }
 __setup("schedstats=", setup_schedstats);
+
+static void __init init_schedstats(void)
+{
+	set_schedstats(__sched_schedstats);
+}
 
 #ifdef CONFIG_PROC_SYSCTL
 int sysctl_schedstats(struct ctl_table *table, int write,
@@ -2227,7 +2783,9 @@ int sysctl_schedstats(struct ctl_table *table, int write,
 		set_schedstats(state);
 	return err;
 }
-#endif
+#endif /* CONFIG_PROC_SYSCTL */
+#else /* !CONFIG_SCHEDSTATS */
+static inline void init_schedstats(void) {}
 #endif
 
 /*
@@ -2294,6 +2852,9 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	set_task_cpu(p, cpu);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+#ifdef CONFIG_GPFS
+	remember_task_fork(p, current);
+#endif
 
 #ifdef CONFIG_SCHED_INFO
 	if (likely(sched_info_on()))
@@ -3101,6 +3662,11 @@ again:
 	BUG(); /* the idle class will always have a runnable task */
 }
 
+#ifdef CONFIG_GPFS
+void transit_busy_to_idle(struct rq *rq);
+void transit_idle_to_busy(struct rq *rq);
+#endif
+
 /*
  * __schedule() is the main scheduler function.
  *
@@ -3217,7 +3783,10 @@ static void __sched notrace __schedule(bool preempt)
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
-
+#ifdef CONFIG_GPFS
+		if (unlikely(next == rq->idle && rq->cfs.was_idle == CFS_RQ_WAS_BUSY))
+			transit_busy_to_idle(rq);
+#endif
 		trace_sched_switch(preempt, prev, next);
 		rq = context_switch(rq, prev, next); /* unlocks the rq */
 	} else {
@@ -4938,6 +5507,345 @@ out_unlock:
 	return retval;
 }
 
+#ifdef CONFIG_GPFS
+static int do_remember_task(pid_t pid) {
+	struct task_struct *p; 
+	long retval;
+	
+	if (pid < 0)
+		return -EINVAL;
+
+	retval = -ESRCH;
+
+	rcu_read_lock();
+	if (pid == 0)
+		p = current;
+	else {
+		p = find_process_by_pid(pid);
+		if (!p)
+			goto out_unlock;
+	}
+
+	get_task_struct(p);
+	retval = __remember_task_new(p, NULL);
+	put_task_struct(p);
+
+out_unlock:
+	rcu_read_unlock();
+	
+	return retval;
+}
+
+/* rcu_read_lock should be held in caller */
+static void __do_get_task_runtime(struct task_struct *p, struct task_runtime_info *info)
+{
+	struct task_struct *t = p;
+	struct task_struct *pos;
+	int init_tid = 0;
+#ifdef CONFIG_GPFS_AMP
+	int type;
+#endif
+
+	do {
+		get_task_struct(t);
+		/* to prevent infinite loop bug */
+		if (unlikely(init_tid == 0))
+			init_tid = t->pid;
+		else if (unlikely(init_tid == t->pid)) {
+			put_task_struct(t);
+			return;
+		}
+
+		info->sum_exec_runtime += t->se.sum_exec_runtime;	
+#ifdef CONFIG_GPFS_AMP
+		info->sum_perf_runtime += t->se.sum_perf_runtime;
+		for_each_type(type)
+			info->sum_type_runtime[type] += t->se.sum_type_runtime[type];
+#endif /* CONFIG_GPFS_AMP */
+
+		if (!list_empty(&t->children)) {
+			int init_child_tid = 0;
+			/* traverse children */
+			list_for_each_entry_rcu(pos, &t->children, sibling) {
+				get_task_struct(pos);
+				/* to prevent infinite loop bug */
+				if (unlikely(init_child_tid == 0))
+					init_child_tid = pos->pid;
+				else if (unlikely(init_child_tid == pos->pid)) {
+					put_task_struct(pos);
+					put_task_struct(t);
+					return;
+				}
+				__do_get_task_runtime(pos, info);
+				put_task_struct(pos);
+			}
+		}
+		put_task_struct(t);
+	} while_each_thread(p, t);
+}
+
+static long do_get_task_runtime(pid_t pid, void __user * __info)
+{
+	struct task_runtime_info info;
+	struct task_struct *p; 
+	long retval;
+	
+	if (pid < 0)
+		return -EINVAL;
+
+	memset(&info, 0, sizeof(struct task_runtime_info));
+
+	retval = -ESRCH;
+
+	preempt_disable();
+	local_irq_disable();
+
+	rcu_read_lock();
+	if (pid == 0)
+		p = current;
+	else {
+		p = find_process_by_pid(pid);
+		if (!p)
+			goto out_unlock;
+	}
+
+	__do_get_task_runtime(p, &info); 
+	retval = 0;
+
+out_unlock:
+	rcu_read_unlock();
+	
+	local_irq_enable();
+	preempt_enable();
+
+	if (retval)
+		return retval;
+
+	if (copy_to_user(__info, &info, sizeof(struct task_runtime_info)))
+		return -EFAULT;
+
+	return 0;
+}
+
+#ifdef CONFIG_GPFS_AMP
+static long set_efficiency(struct task_struct *p, unsigned int mode, unsigned long *effi)
+{
+	int type;
+
+	switch(mode) {
+	case EFFICIENCY_DEFAULT:
+				if (p->effi_mode != mode)
+					set_efficiency_default(p);
+				return 0;
+
+	case EFFICIENCY_STATIC:
+				for_each_type(type) {
+					if (p->__effi[type] != effi[type])
+						break;
+				}
+
+				if (type == NUM_CPU_TYPES) {
+					if (p->effi_mode != mode)
+						p->effi_mode = mode;
+					return 0;
+				}
+				
+				__set_efficiency_mode(p, mode, effi);
+				return 0;
+				
+	case EFFICIENCY_ESTIMATE:
+				return -EPERM; /* not yet implemented */
+	default:
+				return -EINVAL;
+	}
+}
+
+static long do_set_efficiency(pid_t pid, unsigned int mode, void __user *vars) {
+	long retval = 0;
+	struct task_struct *p;
+	unsigned long effi[NUM_CPU_TYPES];
+
+	/* @vars is required only when mode == STATIC. 
+	   If mode == NOT_INIT, we assume that the user does not want to consider the mode */
+	if (vars && (mode == EFFICIENCY_DEFAULT || mode == EFFICIENCY_ESTIMATE))
+		return -EINVAL;
+	/* If you want to use STATIC mode, please give the efficiency. */
+	if (!vars && mode == EFFICIENCY_STATIC)
+		return -EINVAL;
+
+	if (vars && copy_from_user(effi, vars, sizeof(unsigned long) * NUM_CPU_TYPES))
+		return -EFAULT;
+
+	rcu_read_lock();
+	if (pid == 0)
+		p = current;
+	else {
+		retval = -ESRCH;
+		p = find_process_by_pid(pid);
+		if (!p)
+			goto out_unlock;
+	}
+
+	get_task_struct(p);
+	retval = set_efficiency(p, mode, vars ? effi : NULL); 
+	put_task_struct(p);
+
+out_unlock:
+	rcu_read_unlock();
+
+	return retval;
+}
+
+/* if raw == 1, return the raw value of efficiencies.
+   if raw == 0, return the normalized efficiencies. */
+static int do_get_efficiency(pid_t pid, unsigned int raw, void __user *vars) {
+	int mode = -EINVAL;
+	int type;
+	struct task_struct *p;
+	unsigned long effi[NUM_CPU_TYPES];
+
+	if (!vars)
+		return -EFAULT;
+
+	rcu_read_lock();
+	if (pid == 0)
+		p = current;
+	else {
+		mode = -ESRCH;
+		p = find_process_by_pid(pid);
+		if (!p)
+			goto out_unlock;
+	}
+
+	get_task_struct(p);
+	mode = p->effi_mode;
+	if (raw) {
+		for_each_type(type)
+			effi[type] = p->__effi[type];
+	} else {
+		for_each_type(type)
+			effi[type] = p->effi[type];
+	}
+	put_task_struct(p);
+
+out_unlock:
+	rcu_read_unlock();
+
+	if (copy_to_user(vars, effi, sizeof(unsigned long) * NUM_CPU_TYPES))
+		return -EFAULT;
+
+	return mode;
+}
+#endif /* CONFIG_GPFS_AMP */
+#endif /* CONFIG_GPFS */
+
+//#define DEBUG_GPFS_SYSCALL
+/* Definition of operations of fairamp system call */
+#define SET_FAST_CORE               0 /* obsolute */
+#define SET_SLOW_CORE               1 /* obsolute */
+#define SET_UNIT_VRUNTIME	        2 /* obsolute */
+#define GET_THREADS_INFO            3 /* obsolute */
+#define START_MEASURING_IPS_TYPE    4 /* obsolute */
+#define STOP_MEASURING_IPS_TYPE     5 /* obsolute */
+#define CORE_PINNING                6 /* obsolute */
+#define GET_TASK_RUNTIME			7
+#define SET_CPU_TYPE				8
+#define GET_CPU_TYPE				9
+#define SET_EFFICIENCY				11
+#define GET_EFFICIENCY				12
+#define REMEMBER_TASK				13
+#define GET_REMEMBERED_INFO			14
+/**
+ * sys_fairamp - set/change the fairamp related things
+ * @op: the operation id
+ * @id: cpu id or pid, mostly
+ * @num: a number, e.g., unit_vruntime
+ * @vars: a user space pointer for large parameter
+ */
+SYSCALL_DEFINE4(fairamp, int, op, int, id, u64, num, void __user *, vars)
+{
+#ifdef DEBUG_GPFS_SYSCALL
+	printk(KERN_ERR "[SYS_FAIRAMP] op: %d id: %d num: %Ld\n", op, id, num); 
+#endif
+	switch(op) {
+#ifdef CONFIG_GPFS
+		/* for compatibility */
+	case SET_FAST_CORE:
+	case SET_SLOW_CORE:
+	case SET_UNIT_VRUNTIME:
+	case GET_THREADS_INFO:
+	case START_MEASURING_IPS_TYPE:
+	case STOP_MEASURING_IPS_TYPE:
+	case CORE_PINNING:
+			/* obsolete operations */
+			return -EINVAL;
+
+	case GET_TASK_RUNTIME:
+			/* return the info of the task whose pid is @id.
+			 * if id == 0, return the info of the current task.
+			 * The info include vruntime, sum_exec_runtime, sum_perf_runtime, and sum_type_runtime[].
+			 * See the struct task_runtime_info 
+			 */
+			if (num || !vars)
+				return -EINVAL;
+			return do_get_task_runtime(id, vars);
+
+#ifdef CONFIG_GPFS_AMP
+	case SET_CPU_TYPE:
+			if (num >= NUM_CPU_TYPES || vars)
+				return -EINVAL;
+			set_rq_cpu_type(cpu_rq(id), num);
+			return 0;
+
+	case GET_CPU_TYPE:
+			if (num || vars)
+				return -EINVAL;
+			return get_rq_cpu_type(cpu_rq(id));
+
+	case SET_EFFICIENCY:
+			return do_set_efficiency(id, num, vars);
+
+	case GET_EFFICIENCY:
+			return do_get_efficiency(id, num, vars);
+
+#else /* !CONFIG_GPFS_AMP */
+	case SET_CPU_TYPE:	
+	case GET_CPU_TYPE:
+	case SET_EFFICIENCY:
+	case GET_EFFICIENCY:
+			return -EINVAL;
+#endif  /* !CONFIG_GPFS_AMP */
+	case REMEMBER_TASK:
+			if (num || vars)
+				return -EINVAL;
+			return do_remember_task(id);
+
+	case GET_REMEMBERED_INFO:
+			/* id == 0: flush the remembered info
+			 * id == 1: return the number of entires remembered
+			 * id == 2: copy the information to @vars
+			 */
+			if (id == 0) {
+				if (num || vars)
+					return -EINVAL;
+				return remember_task_flush();
+			} else if (id == 1) {
+				if (num || vars)
+					return -EINVAL;
+				return remember_num_info();
+			} else if (id == 2) {
+				if (!num || !vars)
+					return -EINVAL;
+				return get_remembered_info(num, vars);
+			} else
+				return -EINVAL;
+
+#endif /* CONFIG_GPFS */	
+	default: /* invalid operation */
+		return -EINVAL;
+	}
+}
+
 static const char stat_nam[] = TASK_STATE_TO_CHAR_STR;
 
 void sched_show_task(struct task_struct *p)
@@ -5922,6 +6830,35 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	rq_attach_root(rq, rd);
 	tmp = rq->sd;
 	rcu_assign_pointer(rq->sd, sd);
+#ifdef CONFIG_GPFS
+	if (!sd)
+		rcu_assign_pointer(rq->sd_vruntime, NULL);
+	else {
+		rcu_assign_pointer(rq->sd_vruntime, sd->vruntime);
+		/* target vruntime cache will be updated at target_vruntime_balance() */
+		/* to manage cfs_rq->lagged, we postpone updating target vruntime cache. */
+		rq->cfs.target_vruntime = 0;
+		rq->cfs.target_interval = sd->vruntime->interval;
+		rq->cfs.was_idle = CFS_RQ_WAS_IDLE;
+		rq->cfs.idle_start = rq_clock(rq);
+		/* initially, nr_busy = 0. That is, all domains are treated as idle. */
+		if (rq->cfs.nr_running) {
+			unsigned long flags;
+			/* However, actually, it's busy... */
+			raw_spin_lock_irqsave(&rq->lock, flags);
+			if (rq->cfs.nr_running) {
+				rq->cfs.was_idle = CFS_RQ_UNINITIALIZED;
+				transit_idle_to_busy(rq);
+			}
+			raw_spin_unlock(&rq->lock);
+		}
+#ifdef CONFIG_GPFS_SLOW
+		printk(KERN_ERR "[%s] cpu: %d target_vruntime: %lld was_idle: %s\n",
+					__func__, rq->cpu, rq->cfs.target_vruntime,
+					rq->cfs.was_idle == CFS_RQ_WAS_IDLE ? "IDLE" : "BUSY");
+#endif
+	}
+#endif
 	destroy_sched_domains(tmp, cpu);
 
 	update_top_cache_domain(cpu);
@@ -6140,6 +7077,74 @@ build_sched_groups(struct sched_domain *sd, int cpu)
 	return 0;
 }
 
+#ifdef CONFIG_GPFS_SLOW
+#define GPFS_INTERVAL_SCALE 60
+#else
+#define GPFS_INTERVAL_SCALE 1
+#endif
+
+#ifdef CONFIG_GPFS
+/* Assume that sched_domain tree and circular list of groups 
+ * are constructed completely 
+ */
+static int
+build_sd_vruntime(struct sched_domain *sd, int cpu)
+{
+	struct sd_data *sdd = sd->private, *parent_sdd, *child_sdd;
+	struct sched_domain *parent_sd = sd->parent;
+	struct sched_domain *child_sd = sd->child;
+	struct sched_group *next_sg;
+	struct sd_vruntime *sdv;
+	int head_cpu, next_head_cpu, parent_head_cpu;
+	
+
+	head_cpu = cpumask_first(sched_domain_span(sd));
+	sdv = *per_cpu_ptr(sdd->sdv, head_cpu);
+	sd->vruntime = sdv;
+	atomic_inc(&sdv->ref);
+
+	if (cpu != head_cpu)
+		return 0;
+
+	/* initialization */
+	atomic_set(&sdv->updated_by, -1);
+	atomic64_set(&sdv->target, sd->vruntime_interval * GPFS_INTERVAL_SCALE); /* start from the bottom */
+	sdv->interval = sd->vruntime_interval * GPFS_INTERVAL_SCALE;
+	sdv->tolerance = sd->vruntime_tolerance * GPFS_INTERVAL_SCALE;
+	sdv->parent = NULL;
+	sdv->next = sdv;
+	sdv->child = NULL;
+#ifdef CONFIG_GPFS_MIN_TARGET
+	atomic64_set(&sdv->min_target, sd->vruntime_interval * GPFS_INTERVAL_SCALE);
+	atomic64_set(&sdv->min_child, (long) NULL);
+#endif
+	atomic64_set(&sdv->largest_idle_min_vruntime, 0);
+	atomic_set(&sdv->nr_busy, 0); /* nr_busy will be correctly set at cpu_attach_domain() */
+	cpumask_copy(sd_vruntime_span(sdv), sched_domain_span(sd));
+
+	if (child_sd) {
+		/* child_head_cpu == head_cpu */
+		child_sdd = (struct sd_data *) (child_sd->private);
+		sdv->child = *per_cpu_ptr(child_sdd->sdv, head_cpu);
+		atomic_inc(&sdv->child->ref);
+	}
+
+	if (!parent_sd)
+		return 0;
+
+	/* set parent and next */
+	parent_head_cpu = cpumask_first(sched_domain_span(parent_sd));
+	parent_sdd = (struct sd_data *) (parent_sd->private);
+	sdv->parent = *per_cpu_ptr(parent_sdd->sdv, parent_head_cpu);
+	atomic_inc(&sdv->parent->ref);
+	next_sg = parent_sd->groups->next;
+	next_head_cpu = cpumask_first(sched_group_cpus(next_sg));
+	sdv->next = *per_cpu_ptr(sdd->sdv, next_head_cpu);
+	atomic_inc(&sdv->next->ref);
+	return 0;
+}
+#endif
+
 /*
  * Initialize sched groups cpu_capacity.
  *
@@ -6253,6 +7258,11 @@ static void claim_allocations(int cpu, struct sched_domain *sd)
 	WARN_ON_ONCE(*per_cpu_ptr(sdd->sd, cpu) != sd);
 	*per_cpu_ptr(sdd->sd, cpu) = NULL;
 
+#ifdef CONFIG_GPFS
+	if (atomic_read(&(*per_cpu_ptr(sdd->sdv, cpu))->ref))
+		*per_cpu_ptr(sdd->sdv, cpu) = NULL;
+#endif
+
 	if (atomic_read(&(*per_cpu_ptr(sdd->sg, cpu))->ref))
 		*per_cpu_ptr(sdd->sg, cpu) = NULL;
 
@@ -6353,11 +7363,23 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		sd->flags |= SD_PREFER_SIBLING;
 		sd->imbalance_pct = 110;
 		sd->smt_gain = 1178; /* ~15% */
+#ifdef CONFIG_GPFS
+		sd->vruntime_interval = CONFIG_GPFS_INTERVAL_SMT_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GPFS_INTERVAL_SMT_SHARED 
+									* CONFIG_GPFS_TOLERANCE_PERCENT / 100
+									* NSEC_PER_MSEC;
+#endif
 
 	} else if (sd->flags & SD_SHARE_PKG_RESOURCES) {
 		sd->imbalance_pct = 117;
 		sd->cache_nice_tries = 1;
 		sd->busy_idx = 2;
+#ifdef CONFIG_GPFS
+		sd->vruntime_interval = CONFIG_GPFS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GPFS_INTERVAL_LLC_SHARED 
+									* CONFIG_GPFS_TOLERANCE_PERCENT / 100
+									* NSEC_PER_MSEC;
+#endif
 
 #ifdef CONFIG_NUMA
 	} else if (sd->flags & SD_NUMA) {
@@ -6371,6 +7393,19 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 				       SD_BALANCE_FORK |
 				       SD_WAKE_AFFINE);
 		}
+#ifdef CONFIG_GPFS
+		/* according to include/linux/topology.h,
+		 * numa distance is 10 (for local nodes), 20 (for remote nodes), etc.
+		 * We decide to vruntime_interval as 1s, 2s, etc.
+		 */
+		sd->vruntime_interval = CONFIG_GPFS_INTERVAL_NUMA * NSEC_PER_MSEC 
+							* sched_domains_numa_distance[tl->numa_level] / 10;
+		sd->vruntime_tolerance = CONFIG_GPFS_INTERVAL_NUMA 
+							* CONFIG_GPFS_TOLERANCE_PERCENT / 100 /* for tolerance percentage */
+							* NSEC_PER_MSEC 
+							* sched_domains_numa_distance[tl->numa_level] 
+							/ 10; /* for numa distance unit */
+#endif
 
 #endif
 	} else {
@@ -6378,6 +7413,13 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		sd->cache_nice_tries = 1;
 		sd->busy_idx = 2;
 		sd->idle_idx = 1;
+#ifdef CONFIG_GPFS
+		/* I don't know... just similar to SD_SHARE_PKG_RESOURCES... */
+		sd->vruntime_interval = CONFIG_GPFS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GPFS_INTERVAL_LLC_SHARED 
+									* CONFIG_GPFS_TOLERANCE_PERCENT / 100
+									* NSEC_PER_MSEC;
+#endif
 	}
 
 	sd->private = &tl->data;
@@ -6718,6 +7760,12 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 		if (!sdd->sd)
 			return -ENOMEM;
 
+#ifdef CONFIG_GPFS
+		sdd->sdv = alloc_percpu(struct sd_vruntime *);
+		if (!sdd->sdv)
+			return -ENOMEM;
+#endif
+
 		sdd->sg = alloc_percpu(struct sched_group *);
 		if (!sdd->sg)
 			return -ENOMEM;
@@ -6728,6 +7776,9 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 
 		for_each_cpu(j, cpu_map) {
 			struct sched_domain *sd;
+#ifdef CONFIG_GPFS
+			struct sd_vruntime *sdv;
+#endif
 			struct sched_group *sg;
 			struct sched_group_capacity *sgc;
 
@@ -6738,6 +7789,14 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 
 			*per_cpu_ptr(sdd->sd, j) = sd;
 
+#ifdef CONFIG_GPFS
+			sdv = kzalloc_node(sizeof(struct sd_vruntime) + cpumask_size(),
+					GFP_KERNEL, cpu_to_node(j));
+			if (!sdv)
+				return -ENOMEM;
+
+			*per_cpu_ptr(sdd->sdv, j) = sdv;
+#endif
 			sg = kzalloc_node(sizeof(struct sched_group) + cpumask_size(),
 					GFP_KERNEL, cpu_to_node(j));
 			if (!sg)
@@ -6777,6 +7836,10 @@ static void __sdt_free(const struct cpumask *cpu_map)
 				kfree(*per_cpu_ptr(sdd->sd, j));
 			}
 
+#ifdef CONFIG_GPFS
+			if (sdd->sdv)
+				kfree(*per_cpu_ptr(sdd->sdv, j));
+#endif
 			if (sdd->sg)
 				kfree(*per_cpu_ptr(sdd->sg, j));
 			if (sdd->sgc)
@@ -6784,6 +7847,10 @@ static void __sdt_free(const struct cpumask *cpu_map)
 		}
 		free_percpu(sdd->sd);
 		sdd->sd = NULL;
+#ifdef CONFIG_GPFS
+		free_percpu(sdd->sdv);
+		sdd->sdv = NULL;
+#endif
 		free_percpu(sdd->sg);
 		sdd->sg = NULL;
 		free_percpu(sdd->sgc);
@@ -6870,6 +7937,15 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 			}
 		}
 	}
+
+#ifdef CONFIG_GPFS
+	for_each_cpu(i, cpu_map) {
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			if (build_sd_vruntime(sd, i))
+				goto error;
+		}
+	}
+#endif
 
 	/* Calculate CPU capacity for physical packages and nodes */
 	for (i = nr_cpumask_bits-1; i >= 0; i--) {
@@ -7292,6 +8368,9 @@ void __init sched_init(void)
 
 		rq = cpu_rq(i);
 		raw_spin_lock_init(&rq->lock);
+#ifdef CONFIG_GPFS_AMP
+		init_rq_cpu_type(rq);
+#endif
 		rq->nr_running = 0;
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
@@ -7299,7 +8378,11 @@ void __init sched_init(void)
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
 #ifdef CONFIG_FAIR_GROUP_SCHED
+#ifdef CONFIG_GPFS_LARGE_GROUP_SHARES
+		root_task_group.shares = ROOT_TASK_GROUP_LOAD * num_possible_cpus();
+#else
 		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
+#endif
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		/*
 		 * How much cpu bandwidth does root_task_group get?
@@ -7337,11 +8420,20 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 		rq->sd = NULL;
 		rq->rd = NULL;
+#ifdef CONFIG_GPFS
+		rq->sd_vruntime = NULL;
+#endif
+#ifdef CONFIG_GPFS_INFEASIBLE_WEIGHT
+		rq->infeasible_weight = 0;
+#endif
 		rq->cpu_capacity = rq->cpu_capacity_orig = SCHED_CAPACITY_SCALE;
 		rq->balance_callback = NULL;
 		rq->active_balance = 0;
 		rq->next_balance = jiffies;
 		rq->push_cpu = 0;
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+		rq->src_active_mode = SRC_ACTIVE_NOT_INIT;
+#endif
 		rq->cpu = i;
 		rq->online = 0;
 		rq->idle_stamp = 0;
@@ -7398,6 +8490,8 @@ void __init sched_init(void)
 	set_cpu_rq_start_time();
 #endif
 	init_sched_fair_class();
+
+	init_schedstats();
 
 	scheduler_running = 1;
 }

@@ -1,8 +1,12 @@
 VERSION = 4
 PATCHLEVEL = 6
 SUBLEVEL = 4
-EXTRAVERSION =
+EXTRAVERSION = -gpfs
 NAME = Charred Weasel
+
+# To prevent adding plus sign
+LOCALVERSION=
+export LOCALVERSION
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"

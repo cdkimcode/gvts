@@ -75,12 +75,35 @@ static void __cpu_stop_queue_work(struct cpu_stopper *stopper,
 	wake_up_process(stopper->thread);
 }
 
+#ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
+int cpu_stop_thread_on_cpu(unsigned int cpu) {
+	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	if (unlikely(!stopper->thread)) {
+		printk(KERN_ERR "ERROR: cpu: %d stopper->thread == NULL\n", cpu);
+		return 1;
+	}
+#endif
+	return stopper->thread->on_cpu;
+}
+#endif /* CONFIG_GPFS_SRC_ACTIVATED_BALANCING */
 /* queue @work to @stopper.  if offline, @work is completed immediately */
 static bool cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)
 {
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	struct cpu_stopper *stopper;
+	unsigned long flags;
+	bool enabled;
+	BUG_ON(cpu < 0 || cpu > 15);
+	stopper = &per_cpu(cpu_stopper, cpu);
+	BUG_ON(!stopper);
+	BUG_ON(!work);
+	//cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_STOP_QUEUE_START;
+#else
 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
 	unsigned long flags;
 	bool enabled;
+#endif
 
 	spin_lock_irqsave(&stopper->lock, flags);
 	enabled = stopper->enabled;
@@ -89,6 +112,9 @@ static bool cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)
 	else if (work->done)
 		cpu_stop_signal_done(work->done);
 	spin_unlock_irqrestore(&stopper->lock, flags);
+#ifdef CONFIG_DEBUG_SRC_ACTIVE
+	//cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_STOP_QUEUE_END;
+#endif
 
 	return enabled;
 }
