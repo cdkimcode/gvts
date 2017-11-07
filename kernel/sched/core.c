@@ -6785,6 +6785,48 @@ static void update_top_cache_domain(int cpu)
 	rcu_assign_pointer(per_cpu(sd_asym, cpu), sd);
 }
 
+#ifdef CONFIG_GPFS
+/* @sd: sched domain which will be assigned to rq->sd */
+static void
+cpu_attach_sdv(struct rq *rq, struct sched_domain *sd) {
+	int level = 0;
+	struct sd_vruntime *sdv;
+
+	while (sd && !sd->vruntime)
+		sd = sd->parent;
+	/* Now, @sd is NULL or the lowest sched_domain which has sd_vruntime */
+
+	if (!sd)
+		rcu_assign_pointer(rq->sd_vruntime, NULL);
+	else {
+		sdv = sd->vruntime;
+		while (sdv) {
+			sdv->level = level++;
+			sdv = sdv->parent;
+		}
+
+		rcu_assign_pointer(rq->sd_vruntime, sd->vruntime);
+		/* target vruntime cache will be updated at target_vruntime_balance() */
+		/* to manage cfs_rq->lagged, we postpone updating target vruntime cache. */
+		rq->cfs.target_vruntime = 0;
+		rq->cfs.target_interval = sd->vruntime->interval;
+		rq->cfs.was_idle = CFS_RQ_WAS_IDLE;
+		rq->cfs.idle_start = rq_clock(rq);
+		/* initially, nr_busy = 0. That is, all domains are treated as idle. */
+		if (rq->cfs.nr_running) {
+			unsigned long flags;
+			/* However, actually, it's busy... */
+			raw_spin_lock_irqsave(&rq->lock, flags);
+			if (rq->cfs.nr_running) {
+				rq->cfs.was_idle = CFS_RQ_UNINITIALIZED;
+				transit_idle_to_busy(rq);
+			}
+			raw_spin_unlock(&rq->lock);
+		}
+	}
+}
+#endif /* CONFIG_GPFS */
+
 /*
  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
  * hold the hotplug lock.
@@ -6812,12 +6854,48 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			 */
 			if (parent->flags & SD_PREFER_SIBLING)
 				tmp->flags |= SD_PREFER_SIBLING;
+
+#ifdef CONFIG_GPFS
+			if (parent->vruntime) {
+				struct sd_vruntime *sdv, *parent_sdv, *child_sdv;
+				sdv = parent->vruntime;
+				parent_sdv = sdv->parent;
+
+				if (parent_sdv) {
+					parent_sdv->child = sdv->child;
+				} 
+				child_sdv = sdv->child;
+				if (child_sdv) {
+					sdv = child_sdv; /* the first child_sdv */
+					do {
+						child_sdv->parent = parent_sdv;
+						child_sdv = child_sdv->next;
+					} while (child_sdv != sdv);
+				}
+				atomic_set(&parent->vruntime->ref, 0);
+				parent->vruntime = NULL;
+			}
+#endif /* CONFIG_GPFS */
 			destroy_sched_domain(parent, cpu);
 		} else
 			tmp = tmp->parent;
 	}
 
 	if (sd && sd_degenerate(sd)) {
+#ifdef CONFIG_GPFS
+		if (sd->vruntime) {
+			struct sd_vruntime *sdv, *parent_sdv;
+			sdv = sd->vruntime;
+			parent_sdv = sdv->parent;
+
+			if (parent_sdv) {
+				parent_sdv->child = NULL;
+			}
+
+			atomic_set(&sd->vruntime->ref, 0);
+			sd->vruntime = NULL;
+		}
+#endif /* CONFIG_GPFS */
 		tmp = sd;
 		sd = sd->parent;
 		destroy_sched_domain(tmp, cpu);
@@ -6829,36 +6907,11 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 
 	rq_attach_root(rq, rd);
 	tmp = rq->sd;
-	rcu_assign_pointer(rq->sd, sd);
 #ifdef CONFIG_GPFS
-	if (!sd)
-		rcu_assign_pointer(rq->sd_vruntime, NULL);
-	else {
-		rcu_assign_pointer(rq->sd_vruntime, sd->vruntime);
-		/* target vruntime cache will be updated at target_vruntime_balance() */
-		/* to manage cfs_rq->lagged, we postpone updating target vruntime cache. */
-		rq->cfs.target_vruntime = 0;
-		rq->cfs.target_interval = sd->vruntime->interval;
-		rq->cfs.was_idle = CFS_RQ_WAS_IDLE;
-		rq->cfs.idle_start = rq_clock(rq);
-		/* initially, nr_busy = 0. That is, all domains are treated as idle. */
-		if (rq->cfs.nr_running) {
-			unsigned long flags;
-			/* However, actually, it's busy... */
-			raw_spin_lock_irqsave(&rq->lock, flags);
-			if (rq->cfs.nr_running) {
-				rq->cfs.was_idle = CFS_RQ_UNINITIALIZED;
-				transit_idle_to_busy(rq);
-			}
-			raw_spin_unlock(&rq->lock);
-		}
-#ifdef CONFIG_GPFS_SLOW
-		printk(KERN_ERR "[%s] cpu: %d target_vruntime: %lld was_idle: %s\n",
-					__func__, rq->cpu, rq->cfs.target_vruntime,
-					rq->cfs.was_idle == CFS_RQ_WAS_IDLE ? "IDLE" : "BUSY");
+	cpu_attach_sdv(rq, sd);
 #endif
-	}
-#endif
+	rcu_assign_pointer(rq->sd, sd);
+	
 	destroy_sched_domains(tmp, cpu);
 
 	update_top_cache_domain(cpu);
@@ -7084,6 +7137,68 @@ build_sched_groups(struct sched_domain *sd, int cpu)
 #endif
 
 #ifdef CONFIG_GPFS
+/* show the structure of scheduing domains */
+static char cpu_str[nr_cpumask_bits + 1];
+static char *cpumask_str(const struct cpumask *cpu_map) {
+	int i;
+	for (i = 0; i < nr_cpumask_bits; i++) {
+		cpu_str[i] = cpumask_test_cpu(i, cpu_map) ? '1' : '0';
+	}
+	cpu_str[i] = '\0';
+	return cpu_str;
+}
+
+/* make a sdvruntime covering all cpus and attach it to the highest level sched_domain */
+/* @sd is the lowest sched_domain with sd->flags & SD_OVERLAP */
+static int 
+build_overlap_sd_vruntime(struct sched_domain *sd, int cpu)
+{
+	struct sd_data *sdd, *child_sdd;
+	struct sched_domain *child_sd = sd->child;
+	struct sd_vruntime *sdv;
+	int head_cpu;
+	
+	/* to attach to the highest level */
+	while (sd && sd->parent)
+		sd = sd->parent;
+	sdd = sd->private;
+
+	head_cpu = 0; /* head_cpu is always 0 */
+	sdv = *per_cpu_ptr(sdd->sdv, head_cpu);
+	sd->vruntime = sdv;
+	atomic_inc(&sdv->ref);
+
+	if (cpu != head_cpu) {
+		return 0;
+	}
+
+	/* initialization */
+	atomic_set(&sdv->updated_by, -1);
+	atomic64_set(&sdv->target, sd->vruntime_interval); /* start from the bottom */
+	sdv->interval = sd->vruntime_interval;
+	sdv->tolerance = sd->vruntime_tolerance;
+	sdv->parent = NULL;
+	sdv->next = sdv;
+	sdv->child = NULL;
+	
+	atomic64_set(&sdv->min_target, sd->vruntime_interval);
+	atomic64_set(&sdv->min_child, (long) NULL);
+	
+	atomic_set(&sdv->nr_busy, 0); /* nr_busy will be correctly set at cpu_attach_sdv() */
+	cpumask_copy(sd_vruntime_span(sdv), sched_domain_span(sd)); /* assume that the highest domain spans all cpus */
+	sdv->nr_cpus = cpumask_weight(sd_vruntime_span(sdv));
+
+	if (child_sd) {
+		/* child_head_cpu == head_cpu */
+		child_sdd = (struct sd_data *) (child_sd->private);
+		sdv->child = *per_cpu_ptr(child_sdd->sdv, head_cpu);
+		atomic_inc(&sdv->child->ref);
+	}
+
+	/* no parents since this sdv covers all cpus */
+	return 0;
+}
+
 /* Assume that sched_domain tree and circular list of groups 
  * are constructed completely 
  */
@@ -7093,9 +7208,10 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 	struct sd_data *sdd = sd->private, *parent_sdd, *child_sdd;
 	struct sched_domain *parent_sd = sd->parent;
 	struct sched_domain *child_sd = sd->child;
-	struct sched_group *next_sg;
 	struct sd_vruntime *sdv;
-	int head_cpu, next_head_cpu, parent_head_cpu;
+	int head_cpu, parent_head_cpu;
+	struct sd_vruntime *last;
+
 	
 
 	head_cpu = cpumask_first(sched_domain_span(sd));
@@ -7119,8 +7235,9 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 	atomic64_set(&sdv->min_child, (long) NULL);
 #endif
 	atomic64_set(&sdv->largest_idle_min_vruntime, 0);
-	atomic_set(&sdv->nr_busy, 0); /* nr_busy will be correctly set at cpu_attach_domain() */
+	atomic_set(&sdv->nr_busy, 0); /* nr_busy will be correctly set at cpu_attach_sdv() */
 	cpumask_copy(sd_vruntime_span(sdv), sched_domain_span(sd));
+	sdv->nr_cpus = cpumask_weight(sd_vruntime_span(sdv));
 
 	if (child_sd) {
 		/* child_head_cpu == head_cpu */
@@ -7133,14 +7250,29 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 		return 0;
 
 	/* set parent and next */
-	parent_head_cpu = cpumask_first(sched_domain_span(parent_sd));
+	if (parent_sd->flags & SD_OVERLAP) {
+		parent_head_cpu = 0;
+		while (parent_sd && parent_sd->parent)
+			parent_sd = parent_sd->parent;
+	} else {
+		parent_head_cpu = cpumask_first(sched_domain_span(parent_sd));
+	}
+
 	parent_sdd = (struct sd_data *) (parent_sd->private);
 	sdv->parent = *per_cpu_ptr(parent_sdd->sdv, parent_head_cpu);
 	atomic_inc(&sdv->parent->ref);
-	next_sg = parent_sd->groups->next;
-	next_head_cpu = cpumask_first(sched_group_cpus(next_sg));
-	sdv->next = *per_cpu_ptr(sdd->sdv, next_head_cpu);
-	atomic_inc(&sdv->next->ref);
+
+	last = sdv->parent->child;
+	if (last == NULL) {
+		sdv->parent->child = sdv;
+		sdv->next = sdv;
+	} else {
+		while (last->next != sdv->parent->child)
+			last = last->next;
+		last->next = sdv;
+		atomic_inc(&last->ref);
+		sdv->next = sdv->parent->child;
+	}
 	return 0;
 }
 #endif
@@ -7938,15 +8070,6 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		}
 	}
 
-#ifdef CONFIG_GPFS
-	for_each_cpu(i, cpu_map) {
-		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
-			if (build_sd_vruntime(sd, i))
-				goto error;
-		}
-	}
-#endif
-
 	/* Calculate CPU capacity for physical packages and nodes */
 	for (i = nr_cpumask_bits-1; i >= 0; i--) {
 		if (!cpumask_test_cpu(i, cpu_map))
@@ -7958,6 +8081,22 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		}
 	}
 
+#ifdef CONFIG_GPFS
+	/* build sd_vruntime */
+	for_each_cpu(i, cpu_map) {
+		for_each_domain(i, sd) {
+			if (sd->flags & SD_OVERLAP) {
+				if (build_overlap_sd_vruntime(sd, i))
+					goto error;
+				break;
+			} else {
+				if (build_sd_vruntime(sd, i))
+					goto error;
+			}
+		}
+	}
+#endif
+
 	/* Attach the domains */
 	rcu_read_lock();
 	for_each_cpu(i, cpu_map) {
@@ -7965,8 +8104,31 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		cpu_attach_domain(sd, d.rd, i);
 	}
 	rcu_read_unlock();
-
 	ret = 0;
+
+#ifdef CONFIG_GPFS
+//#if 0 // To show sdv topology while booting 
+	for_each_cpu(i, cpu_map) {
+		for_each_domain(i, sd) {
+			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p\n", 
+						i, sd->name,
+						cpumask_str(sched_domain_span(sd)),
+						sd->vruntime ? sd->vruntime->level : -1,
+						sd->vruntime ? sd->vruntime->nr_cpus : -1,
+						sd->vruntime ? sd->vruntime->child ? sd->vruntime->child->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? sd->vruntime->parent ? sd->vruntime->parent->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? cpumask_str(sd_vruntime_span(sd->vruntime)) : "NULL",
+						sd->vruntime,
+						sd->vruntime ? sd->vruntime->next : NULL,
+						sd->vruntime ? sd->vruntime->child : NULL,
+						sd->vruntime ? sd->vruntime->parent : NULL);
+//#endif
+		}
+	}
+#endif
+
 error:
 	__free_domain_allocs(&d, alloc_state, cpu_map);
 	return ret;

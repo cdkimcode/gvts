@@ -1036,6 +1036,8 @@ struct sd_vruntime {
 	/* used only when busy-to-idle or idle-to-busy transition time */
 	atomic64_t largest_idle_min_vruntime;
 	atomic_t nr_busy; /* the number of busy cpus in this domain */
+	int nr_cpus; /* the number of cpus in this domain */
+	int level;
 	unsigned long span[0]; /* The CPUs this domain covers. [variable length] */
 }; 
 
