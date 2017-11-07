@@ -8084,7 +8084,7 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 #ifdef CONFIG_GPFS
 	/* build sd_vruntime */
 	for_each_cpu(i, cpu_map) {
-		for_each_domain(i, sd) {
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
 			if (sd->flags & SD_OVERLAP) {
 				if (build_overlap_sd_vruntime(sd, i))
 					goto error;
@@ -8093,6 +8093,29 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 				if (build_sd_vruntime(sd, i))
 					goto error;
 			}
+		}
+	}
+#endif
+
+#ifdef CONFIG_GPFS
+//#if 0 // To show sdv topology while booting 
+	for_each_cpu(i, cpu_map) {
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p\n", 
+						i, sd->name,
+						cpumask_str(sched_domain_span(sd)),
+						sd->vruntime ? sd->vruntime->level : -1,
+						sd->vruntime ? sd->vruntime->nr_cpus : -1,
+						sd->vruntime ? sd->vruntime->child ? sd->vruntime->child->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? sd->vruntime->parent ? sd->vruntime->parent->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? cpumask_str(sd_vruntime_span(sd->vruntime)) : "NULL",
+						sd->vruntime,
+						sd->vruntime ? sd->vruntime->next : NULL,
+						sd->vruntime ? sd->vruntime->child : NULL,
+						sd->vruntime ? sd->vruntime->parent : NULL);
+//#endif
 		}
 	}
 #endif

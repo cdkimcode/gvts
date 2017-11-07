@@ -1550,11 +1550,9 @@ static inline u64 calc_delta_vruntime(u64 delta, unsigned long effi, struct sche
 	return __calc_delta_effi(delta, effi, &se->vruntime_rem);
 }
 
-#ifdef CONFIG_CFS_BANDWIDTH
 static inline u64 calc_delta_perf(u64 delta, unsigned long effi, struct sched_entity *se) {
 	return __calc_delta_effi(delta, effi, &se->perf_rem);
 }
-#endif
 #endif /* CONFIG_GPFS_AMP */
 #else
 /*
