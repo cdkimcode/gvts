@@ -812,12 +812,6 @@ config GPFS
 		Actually, load balancing tries to all cpus reach
 		the next target as simultaneously as possible.
 
-config DEBUG_SRC_ACTIVE
-	bool "Debug code for source activated balancing"
-	default n
-	help
-		debug
-
 config GPFS_MIN_TARGET
 	bool "Manage and apply the minimum target vruntime of level-0"
 	default y
@@ -873,7 +867,7 @@ config GPFS_DEBUG_NORMALIZATION
 	default n
 	depends on GPFS
 	help
-		debug.....
+		Debug information for virtual time normalization when a task is waking up
 
 config GPFS_NUM_CPU_TYPES
 	int "Number of CPU types"
@@ -1063,20 +1057,6 @@ config GPFS_LARGE_GROUP_SHARES
 	help
 		When set shares of groups, multiply the value by number of possible cpus.
 		This prevents the frequent target value updates.
-
-config GPFS_PRINTK_AT_FORK_AND_EXIT
-	bool 'Printk some information at fork and exit'
-	default n
-	help
-		When fork and exit, print pid, comm, vruntime, sumexec
-		through the serial port.
-
-config GPFS_SLOW
-	bool "Very slow mode of GPFS balancing"
-	default n
-	depends on GPFS
-	help
-		60X slowdown for GPFS balancing for debug.
 
 config IKCONFIG
 	tristate "Kernel .config support"

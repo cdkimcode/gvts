@@ -739,79 +739,6 @@ static const char *sched_tunable_scaling_names[] = {
 	"logaritmic",
 	"linear"
 };
-#ifdef CONFIG_PRINT_SCHED_DOMAIN_AT_SCHED_DEBUG
-/* show the structure of scheduing domains */
-static char cpu_str[nr_cpumask_bits + 1];
-static char *cpumask_str(const struct cpumask *cpu_map, int max_cpu) {
-	int i;
-	for (i = 0; i <= max_cpu; i++) {
-		cpu_str[i] = cpumask_test_cpu(i, cpu_map) ? '1' : '0';
-	}
-	cpu_str[i] = '\0';
-	return cpu_str;
-}
-
-/* show the structure of scheduing domains */
-static void show_sched_domains(struct seq_file *m) {
-	struct sched_domain *sd;
-	struct sched_group *sg;
-	struct sd_vruntime *vruntime;
-	int cpu, level, gid, max_cpu;
-
-	max_cpu = -1;
-	for_each_online_cpu(cpu) {
-		if (cpu > max_cpu)
-			max_cpu = cpu;
-	}
-	
-	SEQ_printf(m, "SSD cpu_map: %s\n", cpumask_str(cpu_online_mask, max_cpu));
-	for_each_possible_cpu(cpu) {
-		SEQ_printf(m, "SSD CPU: %d active: %s present: %s online: %s possible: %s\n", cpu,
-						cpu_active(cpu) ? "O" : "X",
-						cpu_present(cpu) ? "O" : "X",
-						cpu_online(cpu) ? "O" : "X",
-						cpu_possible(cpu) ? "O" : "X");
-		level = 0;
-		for_each_domain(cpu, sd) {
-			SEQ_printf(m, "SSD CPU%02d domain[%d] ptr: %p span: %s SMT: %s shared_cache: %s NUMA: %s\n", 
-					cpu, level, sd, cpumask_str(sched_domain_span(sd), max_cpu),
-					!!(sd->flags & SD_SHARE_CPUCAPACITY) ? "O" : "X",
-					!!(sd->flags & SD_SHARE_PKG_RESOURCES) ? "O" : "X",
-					!!(sd->flags & SD_NUMA) ? "O" : "X");
-			vruntime = sd->vruntime;
-			if (vruntime)
-				SEQ_printf(m, "SSD CPU%02d domain[%d] vruntime ptr: %p next: %p parent: %p child: %p"
-							" target: %lld interval: %lld tolerance: %lld updated_by: %d nr_busy: %d" 
-							" largest_idle_min_vr: %lld\n", 
-						cpu, level, vruntime, vruntime->next, vruntime->parent, vruntime->child,
-						(u64) atomic64_read(&vruntime->target), vruntime->interval, vruntime->tolerance,
-						atomic_read(&vruntime->updated_by), atomic_read(&vruntime->nr_busy), (u64) atomic64_read(&vruntime->largest_idle_min_vruntime));
-			else
-				SEQ_printf(m, "SSD CPU%02d domain[%d] vruntime ptr: NULL\n", 
-						cpu, level);
-			/* sd_llc */
-			sg = sd->groups;
-			gid = 0;
-
-			if (!sg) {
-				SEQ_printf(m, "SSD CPU%02d domain[%d] group[%d] ptr: %p\n", 
-						cpu, level, gid, sg);
-			} else {
-				do {
-					SEQ_printf(m, "SSD CPU%02d domain[%d] group[%d] ptr: %p span: %s weight: %d sgc_ptr: %p capacity: %d\n", 
-							cpu, level, gid, sg, cpumask_str(sched_group_cpus(sg), max_cpu),
-							sg->group_weight, sg->sgc, sg->sgc->capacity);
-					sg = sg->next;
-					gid++;
-				} while (sg != sd->groups);
-			}
-			level++;
-		}
-		
-	}
-	SEQ_printf(m, "SSD end\n");
-}
-#endif
 
 static void sched_debug_header(struct seq_file *m)
 {
@@ -863,9 +790,6 @@ static void sched_debug_header(struct seq_file *m)
 		sysctl_sched_tunable_scaling,
 		sched_tunable_scaling_names[sysctl_sched_tunable_scaling]);
 	SEQ_printf(m, "\n");
-#ifdef CONFIG_PRINT_SCHED_DOMAIN_AT_SCHED_DEBUG
-	show_sched_domains(m); /* XXX: cdkim */
-#endif
 }
 
 static int sched_debug_show(struct seq_file *m, void *v)
@@ -1180,11 +1104,7 @@ static void dump_rq(struct rq *rq) {
 #ifdef CONFIG_GPFS_AMP
 			" %4d"
 #endif
-			" %6d %6ld %8d %20s %16lld %16lld %16lld %16lld %16lld %16lld %16lld %10ld"
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-			" %4d"
-#endif
-			"\n",
+			" %6d %6ld %8d %20s %16lld %16lld %16lld %16lld %16lld %16lld %16lld %10ld\n",
 				cpu_of(rq),
 #ifdef CONFIG_GPFS_AMP
 				rq->cpu_type,
@@ -1201,9 +1121,6 @@ static void dump_rq(struct rq *rq) {
 				rq->cfs.target_interval,
 				rq->cfs.lagged,
 				rq->cfs.lagged_weight
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-				,rq->src_active_mode
-#endif
 				);
 }
 
@@ -1220,11 +1137,7 @@ void dump_sched(void) {
 #ifdef CONFIG_GPFS_AMP
 			" %4s"
 #endif
-			" %6s %6s %8s %20s %16s %16s %16s %16s %16s %16s %16s %10s"
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-			" mode"
-#endif
-			"\n",
+			" %6s %6s %8s %20s %16s %16s %16s %16s %16s %16s %16s %10s\n",
 				"cpu",
 #ifdef CONFIG_GPFS_AMP
 				"type",

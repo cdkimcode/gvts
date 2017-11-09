@@ -658,10 +658,6 @@ void do_exit(long code)
 	struct task_struct *tsk = current;
 	int group_dead;
 	TASKS_RCU(int tasks_rcu_i);
-#ifdef CONFIG_GPFS_PRINTK_AT_FORK_AND_EXIT
-	pr_err("[%s] pid: %5d comm: %20s vruntmie: %16lld sum_exec: %16lld\n",
-			__func__, tsk->pid, tsk->comm, tsk->se.vruntime, tsk->se.sum_exec_runtime);
-#endif
 #ifdef CONFIG_GPFS
 	remember_task_exit(tsk);
 #endif

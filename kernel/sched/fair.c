@@ -553,78 +553,27 @@ static inline s64 cpu_lagged(int cpu, u64 target) {
 }
 
 #ifdef CONFIG_GPFS_AMP
-#define DEBUG_SE_EFFI
 #ifdef CONFIG_FAIR_GROUP_SCHED
-/* se->effi == NULL */
-static unsigned long __se_effi(struct sched_entity *se, int type) {
-	struct sched_entity *curr = se;
-#ifdef DEBUG_SE_EFFI
-	if (unlikely(entity_is_task(se))) {
-		printk(KERN_ERR "%s: ERROR task->se->effi == NULL pid: %d comm: %s\n",
-					__func__, task_of(se)->pid, task_of(se)->comm);
-		panic("panic");
-	}
-#endif
-
-	while (curr && !curr->effi) {
-		printk(KERN_ERR "%s: se->effi == NULL ??  group_id: %d\n", 
-					__func__, cfs_rq_of(curr)->tg->css.id);
-		curr = curr->my_q->curr;
-	}
-
-#ifdef DEBUG_SE_EFFI
-	if (unlikely(!curr)) {
-		//printk(KERN_ERR "%s: ERROR lost way\n", __func__);
-		//return NICE_0_LOAD;
-		/* curr = se;
-		while (curr) {
-			printk(KERN_ERR "%s: ERROR group_id: %d\n", 
-					__func__, cfs_rq_of(curr)->tg->css.id);
-			curr = curr->my_q->curr;
-		} */
-		panic("%s: ERROR lost way", __func__);
-	}
-#endif
-
-	for (; curr != se; curr = curr->parent)
-		curr->parent->effi = curr->effi;
-panic("%s: dive into here...\n", __func__);
-	return se->effi[type];
-}
 
 static inline unsigned long se_effi(struct sched_entity *se, int type) {
-	if (likely(se->effi))
-		return se->effi[type];
-	return __se_effi(se, type);
+	BUG_ON(!se->effi); /* if this bug occurs, see set_curr_effi() and put_prev_effi() */
+	return se->effi[type];
 }
 
 static inline void set_curr_effi(struct task_struct *p) {
 	struct sched_entity *se = &p->se;
 	struct sched_entity *parent = se->parent;
-#ifdef DEBUG_SE_EFFI
-	if (unlikely(!se->effi))
-		panic("%s: se->effi == NULL\n", __func__);
-	//printk(KERN_ERR "%s: pid: %d comm: %s\n", __func__, p->pid, p->comm);
-#endif
 	for_each_sched_entity(parent) 
 		parent->effi = se->effi;
 }
 static inline void put_prev_effi(struct task_struct *p) {
-	struct sched_entity *se = &p->se;
-	struct sched_entity *parent = se->parent;
-#ifdef DEBUG_SE_EFFI
-	if (unlikely(!se->effi))
-		panic("%s: se->effi == NULL\n", __func__);
-	//printk(KERN_ERR "%s: pid: %d comm: %s\n", __func__, p->pid, p->comm);
-#endif
+	struct sched_entity *parent = p->se.parent;
 	for_each_sched_entity(parent) 
 		parent->effi = NULL;
 }
 #else /* !CONFIG_FAIR_GROUP_SCHED */
 static inline unsigned long se_effi(struct sched_entity *se, int type) {
-	if (unlikely(!se->effi))
-		panic("%s: ERROR task->se->effi == NULL pid: %d comm: %d\n",
-					__func__, task_of(se)->pid, task_of(se)->comm);
+	BUG_ON(!se->effi);
 	return se->effi[type];
 }
 #define set_curr_effi(p) do{}while(0)
@@ -632,442 +581,6 @@ static inline unsigned long se_effi(struct sched_entity *se, int type) {
 #endif /* !CONFIG_FAIR_GROUP_SCHED */
 #endif /* CONFIG_GPFS_AMP */
 
-#define DEBUG_LAGGED 0
-#if DEBUG_LAGGED > 0
-static void
-__debug_gather(int id, struct rq *rq, struct task_struct *p, unsigned long old, unsigned long new, int mode, int error) {
-#define NUM_DEBUG_DATA 40
-	static DEFINE_SPINLOCK(debugging);
-	static struct {
-		atomic_t id; /* 0: invalid / 1: update_rq_lagged_weight / 2: update_eff_load */
-		unsigned long jiffies;
-		int cpu;
-		unsigned long nr_running;
-		int pid;
-		char comm[20];
-		unsigned long task_weight;
-		unsigned long rq_weight;
-		unsigned long old;
-		unsigned long new;
-		int mode;
-	} data[NUM_DEBUG_DATA];
-	static atomic64_t idx_global = {-1};
-	int idx, i, end;
-#ifdef CONFIG_LOCKDEP
-	int release_lock = 0;
-#endif
-
-	i = atomic64_inc_return(&idx_global);
-	idx = i % NUM_DEBUG_DATA;
-
-	BUG_ON(id == 0);
-	data[idx].jiffies = jiffies;
-	data[idx].cpu = rq->cpu;
-	data[idx].nr_running = rq->cfs.h_nr_running;
-	data[idx].pid = p->pid;
-	for (i = 0; i < 20 && p->comm[i] != '\0'; i++)
-		data[idx].comm[i] = p->comm[i];
-	if (i < 20) data[idx].comm[i] = '\0';
-	data[idx].task_weight = p->se.eff_load.weight;
-	data[idx].rq_weight = rq->cfs.lagged_weight;
-	data[idx].old = old;
-	data[idx].new = new;
-	data[idx].mode = mode;
-	mb();
-	atomic_set(&data[idx].id, id);
-
-
-	if (!error)
-		return;
-
-	preempt_disable();
-#ifdef CONFIG_LOCKDEP
-	if (lock_is_held(&rq->lock.dep_map)) {
-		release_lock = 1;
-		raw_spin_unlock(&rq->lock);
-	}
-#endif
-	spin_lock(&debugging);
-	i = (idx + 1) % NUM_DEBUG_DATA;
-	end = i; /* the next element of the end element */
-	/* note that at least one item is valid. */
-	while (atomic_read(&data[i].id) == 0)
-		i = (i + 1) % NUM_DEBUG_DATA;
-	
-	do {
-		id = atomic_xchg(&data[i].id, 0);
-		if (id == 0)
-			break;
-		printk(KERN_ERR "DEBUG %16ld [%s] cpu: %2d nr: %2ld pid: %5d comm: %20s"
-				 		" se.weight: %5ld rq.weight: %9ld old: %6ld new: %6ld %s: %d\n",
-						data[i].jiffies,
-						id == 1 ? "rq_eff__" :
-						id == 2 ? "task_eff" :
-										  "invalid_",
-						data[i].cpu,
-						data[i].nr_running,
-						data[i].pid,
-						data[i].comm,
-						data[i].task_weight,
-						data[i].rq_weight,
-						data[i].old,
-						data[i].new,
-						id == 1 ? "mode" :
-						id == 2 ? "onrq" :
-										  "err_",
-						data[i].mode);
-		i = (i + 1) % NUM_DEBUG_DATA;
-	} while (i != end);
-	panic("Bug in lagged_weight");
-	spin_unlock(&debugging);
-#ifdef CONFIG_LOCKDEP
-	if (release_lock)
-		raw_spin_lock(&rq->lock);
-#endif
-	preempt_enable();
-#undef NUM_DEBUG_DATA
-}
-
-static void
-__debug_update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target, int mode) {
-	/* for @mode, 0: update target_vruntime_cache() without rq->lock
-	 *            1: update_target_vruntime_cache() with rq->lock
-	 *            2: update_lagged_enqueue() with rq->lock
-	 *            3: update_lagged_dequeue() with rq->lock]
-	 */
-	struct rq *rq = rq_of(cfs_rq);
-	struct task_struct *p, *n;
-	struct sched_entity *se;
-	unsigned long flags;
-	s64 lagged, lagged_one, lagged_add, lagged_sum, lagged_correct;
-	unsigned long lagged_weight_sum = 0, eff_weight_sum = 0;
-	int print = 0;
-	int correct_weight = 1, correct_weight_real = 1, correct_lagged_one = 1, correct_lagged_sum = 1;
-	static atomic64_t num_called = {0}, num_correct = {0};
-	static atomic64_t num_wrong_weight = {0}, num_wrong_weight_real = {0};
-	static atomic64_t num_wrong_lagged_one = {0}, num_wrong_lagged_sum = {0};
-	static unsigned long __num_called, __num_correct, __num_wrong_weight, __num_wrong_weight_real, __num_wrong_lagged_one, __num_wrong_lagged_sum;
-	struct {
-		s64 lagged;
-		s64 lagged_saved;
-		u64 lagged_target;
-		u64 vruntime;
-		unsigned long weight;
-	} tsk_info[cfs_rq->h_nr_running];
-	int num_task = 0, i;
-#ifdef CONFIG_GPFS_AMP
-	int type = rq->cpu_type;
-#endif
-
-	preempt_disable();
-
-	if (mode == 0) raw_spin_lock_irqsave(&rq->lock, flags);
-	lagged_add = (target - cfs_rq->target_vruntime) * cfs_rq_lagged_weight_sum(cfs_rq);
-	lagged_one = cfs_rq->lagged + lagged_add;
-	lagged_sum = 0;
-	lagged_correct = 0;
-
-	list_for_each_entry_safe(p, n, &rq->cfs_tasks, se.group_node) {
-		se = &p->se;
-		lagged_correct += task_lagged(se, target);
-#ifdef CONFIG_GPFS_CONSIDER_UTIL
-		lagged = (se->lagged_target - se->vruntime) * se->lagged_weight;
-#else
-		lagged = (se->lagged_target - se->vruntime) * se->eff_load.weight;
-#endif
-		if (se->lagged_target != target)
-			lagged += (target - se->lagged_target) * se->lagged_weight;
-		lagged_sum += lagged;
-
-		lagged_weight_sum += se->lagged_weight;
-		eff_weight_sum += se->eff_load.weight;
-
-		tsk_info[num_task].lagged = lagged;
-		tsk_info[num_task].lagged_saved = se->lagged;
-		tsk_info[num_task].lagged_target = se->lagged_target;
-		tsk_info[num_task].vruntime = se->vruntime;
-		tsk_info[num_task].weight = se->lagged_weight;
-		num_task++;
-	}
-
-	if (lagged_weight_sum != cfs_rq_lagged_weight_sum(cfs_rq))
-		correct_weight_real = 0;
-		
-	if (eff_weight_sum != cfs_rq_lagged_weight_sum(cfs_rq))
-		correct_weight = 0;
-	
-	if (lagged_one != lagged_sum)
-		correct_lagged_one = 0;
-
-	if (lagged_sum != lagged_correct)
-		correct_lagged_sum = 0;
-
-	if (mode == 0) raw_spin_unlock_irqrestore(&rq->lock, flags);
-
-	__num_called = atomic64_inc_return(&num_called);
-	if (correct_weight && correct_weight_real && correct_lagged_one && correct_lagged_sum) {
-		__num_correct = atomic64_inc_return(&num_correct);
-		goto out;
-	} else
-		__num_correct = atomic64_read(&num_correct);
-	
-	if (!correct_weight) 
-		__num_wrong_weight = atomic64_inc_return(&num_wrong_weight);
-	else
-		__num_wrong_weight = atomic64_read(&num_wrong_weight);
-	if (!correct_weight_real) 
-		__num_wrong_weight_real = atomic64_inc_return(&num_wrong_weight_real);
-	else
-		__num_wrong_weight_real = atomic64_read(&num_wrong_weight_real);
-	if (!correct_lagged_one)
-		__num_wrong_lagged_one = atomic64_inc_return(&num_wrong_lagged_one);
-	else
-		__num_wrong_lagged_one = atomic64_read(&num_wrong_lagged_one);
-	if (!correct_lagged_sum) 
-		__num_wrong_lagged_sum = atomic64_inc_return(&num_wrong_lagged_sum);
-	else
-		__num_wrong_lagged_sum = atomic64_read(&num_wrong_lagged_sum);
-		
-	if ((!correct_weight && (__num_wrong_weight < 20 || __num_wrong_weight % 500 == 0))
-			|| (!correct_weight_real && (__num_wrong_weight_real < 20 || __num_wrong_weight_real % 500 == 0))) {
-		printk(KERN_ERR "[%s] cpu: %d nr_running: %d rq->weight: %ld eff_weight_sum: %ld lagged_weight_sum: %ld\n",
-			"DEBUG_TVR$", cpu_of(rq), cfs_rq->h_nr_running, cfs_rq_lagged_weight_sum(cfs_rq), eff_weight_sum, lagged_weight_sum);
-		print = 1;
-	}
-
-	if ((!correct_lagged_one && (__num_wrong_lagged_one < 20 || __num_wrong_lagged_one % 500 == 0)) 
-			|| (!correct_lagged_sum && (__num_wrong_lagged_sum < 20 || __num_wrong_lagged_sum % 500 == 0))){
-		printk(KERN_ERR "[%s] cpu: %d nr_running: %d rq->lagged: %lld added: %lld "
-						"lagged_one: %lld lagged_sum: %lld lagged_correct: %lld\n",
-						"DEBUG_TVR$", cpu_of(rq), cfs_rq->h_nr_running, cfs_rq->lagged, lagged_add,
-						lagged_one, lagged_sum, lagged_correct);
-		print = 1;
-	}
-
-out:
-	if (print == 1 || (__num_called > 0 && __num_called % 1000 == 0))
-		printk(KERN_ERR "[%s] (%s) cpu: %d num_called: %ld correct: %ld wrong: weight: %ld weight_real: %ld lagged_one: %ld lagged_sum: %ld\n",
-				"DEBUG_TVR$",
-				mode == 0 ? "$_U" :
-				mode == 1 ? "$_L" :
-				mode == 2 ? "enQ" :
-				mode == 3 ? "deQ" :
-							"inv",
-				cpu_of(rq), __num_called, __num_correct, __num_wrong_weight, __num_wrong_weight_real, __num_wrong_lagged_one, __num_wrong_lagged_sum);
-	if (!correct_lagged_one) {
-		if (mode != 0)
-			raw_spin_unlock(&rq->lock);
-		__update_lagged_printk(-1, NULL, cfs_rq, 0);
-		for (i = 0; i < num_task; i++) {
-			printk(KERN_ERR "[TSK_INFO] %2d/%-2d lagged: %lld saved: %lld target: %lld vruntime: %lld weight: %ld\n",
-				i + 1, num_task,
-				tsk_info[i].lagged,
-				tsk_info[i].lagged_saved,
-				tsk_info[i].lagged_target,
-				tsk_info[i].vruntime,
-				tsk_info[i].weight);
-		}
-		if (mode != 0)
-			raw_spin_lock(&rq->lock);
-	}
-		
-	preempt_enable();
-}
-
-/* gather data and print out when mode == -1 */
-static inline void __update_lagged_printk(int mode, struct sched_entity *se, struct cfs_rq *cfs_rq, s64 delta) {
-#define NUM_DEBUG_DATA 30
-	static DEFINE_SPINLOCK(debugging);
-	static struct {
-		int mode; /* 0: invalid entry
-					 1: update_lagged_target
-					 2: update_lagged
-					 3: update_lagged_enqueue
-					 4: update_lagged_dequeue
-					 5: update_target_vruntime_cache */
-		unsigned long jiffies;
-		int cpu;
-		int on_cpu;
-		int nr_running;
-		int pid;
-		u64 vruntime;
-		unsigned long weight;
-		unsigned long weight_real;
-		int on_rq;
-		unsigned long rq_weight;
-		s64 lagged;
-		s64 lagged_target;
-		s64 delta;
-		s64 rq_lagged;
-		s64 rq_target_vruntime;
-	} data[16][NUM_DEBUG_DATA];
-	//static atomic_t initialized = {0};
-	static atomic64_t idx_global[16] = { {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1} };
-	static atomic_t num_error = {0};
-	int idx, end;
-	int cpu, on_cpu;
-#ifdef CONFIG_LOCKDEP
-	int release_lock = 0;
-#endif
-
-	BUG_ON(mode == 0);
-	if (se && !cfs_rq)
-		cfs_rq = &rq_of(cfs_rq_of(se))->cfs;
-	cpu = rq_of(cfs_rq)->cpu;
-	
-	if (mode == -1)
-		goto printout;
-
-	
-	preempt_disable();
-	on_cpu = smp_processor_id();
-	idx = atomic64_inc_return(&idx_global[cpu]) % NUM_DEBUG_DATA;
-
-
-	data[cpu][idx].jiffies = jiffies;
-	data[cpu][idx].cpu = rq_of(cfs_rq)->cpu;
-	data[cpu][idx].on_cpu = on_cpu;
-	data[cpu][idx].nr_running = cfs_rq->h_nr_running;
-	if (se) {
-		data[cpu][idx].pid = task_of(se)->pid;
-		data[cpu][idx].vruntime = se->vruntime;
-		data[cpu][idx].weight = se->eff_load.weight;
-		data[cpu][idx].weight_real = se->lagged_weight;
-		data[cpu][idx].on_rq = se->on_rq;
-		data[cpu][idx].lagged = se->lagged;
-		data[cpu][idx].lagged_target = se->lagged_target;
-	} else {
-		data[cpu][idx].pid = 0;
-		data[cpu][idx].vruntime = 0;
-		data[cpu][idx].weight = cfs_rq->load.weight;
-		data[cpu][idx].weight_real = cfs_rq->lagged_weight;
-		data[cpu][idx].on_rq = -1;
-		data[cpu][idx].lagged = 0;
-		data[cpu][idx].lagged_target = 0;
-	}
-	data[cpu][idx].delta = delta;
-	data[cpu][idx].rq_lagged = cfs_rq->lagged;
-	data[cpu][idx].rq_target_vruntime = cfs_rq->target_vruntime;
-	data[cpu][idx].mode = mode;
-
-	preempt_enable();
-	return;
-
-printout:
-	preempt_disable();
-#ifdef CONFIG_LOCKDEP
-	if (lock_is_held(&rq_of(cfs_rq)->lock.dep_map)) {
-		release_lock = 1;
-		raw_spin_unlock(&rq_of(cfs_rq)->lock);
-	}
-#endif
-	spin_lock(&debugging);
-	idx = (atomic64_read(&idx_global[cpu]) + 1) % NUM_DEBUG_DATA;
-	end = idx;
-
-	if (idx == -1) {
-		printk(KERN_ERR "[%s] found no items\n", __func__);
-		goto out;
-	}
-
-
-	/* here, at least one item exists. */
-	while (data[cpu][idx].mode == 0)
-		idx = (idx + 1) % NUM_DEBUG_DATA;
-
-	printk(KERN_ERR "DEBUG_LAGGED %16s %8s %6s %2s %5s"
-					" %16s %6s %5s %2s %16s %16s %16s"
-					" %16s %16s\n",
-					"jiffies", "mode", "cpu", "nr", "pid",
-					"vruntime", "weight", "real", "on", "lagged", "lagged_target", "delta",
-					"rq->lagged", "rq->target");
-
-
-	do {
-		if (data[cpu][idx].mode == 0)
-			break;
-
-		printk(KERN_ERR "DEBUG_LAGGED %16ld %8s %2d->%-2d %2d %5d"
-						" %16lld %6ld %5ld %2d %16lld %16lld %16lld"
-						" %16lld %16lld\n",
-						data[cpu][idx].jiffies,
-						data[cpu][idx].mode == 1 ? "lagged_t" :
-						data[cpu][idx].mode == 2 ? "lagged__" :
-						data[cpu][idx].mode == 3 ? "enqueue_" :
-						data[cpu][idx].mode == 4 ? "dequeue_" :
-						data[cpu][idx].mode == 5 ? "target_$" :
-									"invalid",
-						data[cpu][idx].on_cpu,
-						data[cpu][idx].cpu,
-						data[cpu][idx].nr_running,
-						data[cpu][idx].pid,
-						data[cpu][idx].vruntime,
-						data[cpu][idx].weight,
-						data[cpu][idx].weight_real,
-						data[cpu][idx].on_rq,
-						data[cpu][idx].lagged,
-						data[cpu][idx].lagged_target,
-						data[cpu][idx].delta,
-						data[cpu][idx].rq_lagged,
-						data[cpu][idx].rq_target_vruntime);
-		data[cpu][idx].mode = 0;
-		idx = (idx + 1) % NUM_DEBUG_DATA;
-	} while (idx != end);
-out:
-	spin_unlock(&debugging);
-#ifdef CONFIG_LOCKDEP
-	if (release_lock)
-		raw_spin_lock(&rq_of(cfs_rq)->lock);
-#endif
-	preempt_enable();
-	if (atomic_inc_return(&num_error) >= 4)
-		panic("Bug in lagged");
-#undef NUM_DEBUG_DATA
-}
-#else /* DEBUG_LAGGED == 0 */
-#define __debug_gather(...) do{}while(0)
-#define __debug_update_target_vruntime_cache(...) do{}while(0)
-#define __update_lagged_printk(...) do{}while(0)
-#endif /* DEBUG_LAGGED == 0 */
-
-#if DEBUG_LAGGED > 0
-static void
-update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se, 
-							unsigned long old, unsigned long new, int mode) {
-	static int num_called = 0; 
-	
-	num_called++;
-	if (cfs_rq->h_nr_running == 0 && mode == 2 && cfs_rq->lagged_weight != old)
-		mode = -1;
-	
-	BUG_ON(&rq_of(cfs_rq)->cfs != cfs_rq);
-	
-	if (new == old)
-		goto out;
-	else if (new > old)
-		cfs_rq->lagged_weight += (new - old);
-	else {
-		if (cfs_rq->lagged_weight < (old - new)) {
-			mode = -2;
-			goto out;
-		}
-		cfs_rq->lagged_weight -= (old - new);
-	}
-	
-	/* DEBUG */
-out:	
-	__debug_gather(1,
-					rq_of(cfs_rq),
-					task_of(se),
-					old,
-					new,
-					mode,
-					mode < 0);
-}
-#define update_rq_lagged_weight_enqueue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 1)
-#define update_rq_lagged_weight_dequeue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 2)
-#define update_rq_lagged_weight_update(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new, 3)
-#else /* DEBUG_LAGGED == 0 */
 static void
 update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se, 
 							unsigned long old, unsigned long new) {
@@ -1083,7 +596,6 @@ update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se,
 #define update_rq_lagged_weight_enqueue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
 #define update_rq_lagged_weight_dequeue(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
 #define update_rq_lagged_weight_update(cfs_rq, se, old, new) update_rq_lagged_weight(cfs_rq, se, old, new)
-#endif /* DEBUG_LAGGED == 0 */
 
 static inline void __update_lagged_target(struct sched_entity *se, u64 target) {
 	/* lagged_delta when target changed.
@@ -1096,19 +608,9 @@ static inline void __update_lagged_target(struct sched_entity *se, u64 target) {
 	 * In addition, note that we use @lagged_weight. When this value applied to cfs_rq->lagged,
 	 * se->lagged_weight value was used. @eff_load.weight is a kind of normalized value.
 	 */
-	 __update_lagged_printk(1, se, NULL, (s64) (target - se->lagged_target) * se->lagged_weight);
 	se->lagged += (s64) (target - se->lagged_target) * se->lagged_weight;
 	se->lagged_target = target;
 }
-
-#if 0 /* useless */
-static void update_lagged_target(struct sched_entity *se, struct cfs_rq *cfs_rq) {
-	u64 target = cfs_rq_target_vruntime(cfs_rq);
-
-	if (unlikely(se->lagged_target != target))
-		__update_lagged_target(se, target);
-}
-#endif
 
 static inline void update_lagged(struct sched_entity *se, struct cfs_rq *cfs_rq) {
 	u64 target = cfs_rq_target_vruntime(cfs_rq);
@@ -1126,7 +628,6 @@ static inline void update_lagged(struct sched_entity *se, struct cfs_rq *cfs_rq)
 	delta = lagged - se->lagged;
 	if (delta == 0)
 		return;
-	__update_lagged_printk(2, se, cfs_rq, delta);
 	se->lagged = lagged;
 	cfs_rq->lagged += delta;
 }
@@ -1139,17 +640,13 @@ static inline void update_lagged_enqueue(struct sched_entity *se, struct cfs_rq 
 	se->lagged = (target - se->vruntime) * se->eff_load.weight;
 #endif
 	se->lagged_target = target;
-	__update_lagged_printk(3, se, cfs_rq, 0);
 	cfs_rq->lagged += se->lagged;
-	__debug_update_target_vruntime_cache(cfs_rq, cfs_rq->target_vruntime, 2);
 }
 
 static inline void update_lagged_dequeue(struct sched_entity *se, struct cfs_rq *cfs_rq) {
-	__update_lagged_printk(4, se, cfs_rq, 0);
 	cfs_rq->lagged -= se->lagged;
 	se->lagged = 0;
 	se->lagged_target = 0;
-	__debug_update_target_vruntime_cache(cfs_rq, cfs_rq->target_vruntime, 3);
 }
 
 #ifdef CONFIG_GPFS_MIN_TARGET
@@ -1377,10 +874,7 @@ void update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target, int locked)
 	s64 my_target = (s64) cfs_rq->target_vruntime;
 
 	if (likely(target > my_target)) {
-		s64 add;
-		__update_lagged_printk(5, NULL, cfs_rq, (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq));
-		__debug_update_target_vruntime_cache(cfs_rq, target, locked);
-		add = (s64) (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq);
+		s64 add = (s64) (target - my_target) * cfs_rq_lagged_weight_sum(cfs_rq);
 		if (unlikely(is_lagged_overflowed(cfs_rq->lagged, add))) /* overflow occurred! */
 			return __update_target_vruntime_cache(cfs_rq, target);
 		cfs_rq->lagged += add; 
@@ -3812,50 +3306,6 @@ up:
 	} 
 }
 
-//#define DEBUG_TG_LOAD_SUM_CONTRIB
-#ifdef DEBUG_TG_LOAD_SUM_CONTRIB
-inline void __debug_tg_load_sum_contrib(const char *func_name, const char *header,
-								struct sched_entity *se, struct task_group *tg,
-								unsigned long old, unsigned long new,
-								int flag) {
-	BUG_ON(se == NULL);
-	gpfs_msg("[%s] %s tg_load_sum_contrib: %ld old: %ld new: %ld p->pid: %d p->comm: %s p->state: %ld(%s) p->weight: %ld group_id: %d (level: %d) parent_tg_id: %d (level: %d) flag: %s\n",
-			func_name, header, se->tg_load_sum_contrib, old, new,
-			entity_is_task(se) ? task_of(se)->pid : -1, 
-			entity_is_task(se) ? task_of(se)->comm : "Not_a_Task",
-			entity_is_task(se) ? task_of(se)->state : -2,
-			entity_is_task(se) ? (	task_of(se)->state == -1 ? "unrunnable" :
-									task_of(se)->state == 0 ? "runnable" :
-															"stopped"	)
-								: "Not_a_task",
-			se->load.weight,
-			tg == NULL				? -1 
-									: tg->css.cgroup == NULL	? tg->css.id 
-																: tg->css.cgroup->id,
-			tg == NULL				? -1 
-									: tg->css.cgroup == NULL	? -2 
-																: tg->css.cgroup->level,
-			tg == NULL	? -1
-						: tg->parent == NULL	? -100
-												: tg->parent->css.cgroup == NULL	? tg->parent->css.id 
-																						: tg->parent->css.cgroup->id,
-			tg == NULL	? -1 
-						: tg->parent == NULL	? -100 
-												: tg->parent->css.cgroup == NULL	? -2
-																					: tg->parent->css.cgroup->level,
-
-			flag == TG_LOAD_SUM_SLEEP ? "sleep" :
-			flag == TG_LOAD_SUM_WAKEUP ? "wakeup" :
-			flag == TG_LOAD_SUM_DETACH ? "detach" :
-			flag == TG_LOAD_SUM_ATTACH ? "attach" :
-			flag == TG_LOAD_SUM_CHANGE ? "change" :
-										 "unknown"
-			);
-}
-#else
-#define __debug_tg_load_sum_contrib(...) do{}while(0)
-#endif 
-
 /* rq->lock held */
 inline void update_tg_load_sum(struct sched_entity *se, struct task_group *tg, 
 								unsigned long old, unsigned long new, 
@@ -3865,15 +3315,6 @@ inline void update_tg_load_sum(struct sched_entity *se, struct task_group *tg,
 	if (tg == &root_task_group)
 		return;
 	
-	__debug_tg_load_sum_contrib(__func__,
-				tg == &root_task_group ? "root_task_group" :
-				((flag == TG_LOAD_SUM_CHANGE) && se->tg_load_sum_contrib == 0) ? "change_load_while_sleep" :
-				((flag == TG_LOAD_SUM_DETACH) && se->tg_load_sum_contrib == 0 && (tg && tg->parent == &root_task_group)) ? "detach_from_root" :
-				se->tg_load_sum_contrib != old ? "contrib!=old" :
-				old == new ? "old==new" :
-				"normal", 
-				se, tg, old, new, flag);
-
 	/* weight changes, attach, or detach, but the task is sleeping or stopped.
 	 * This change will be applied when the task will wake up. */
 	if (se->tg_load_sum_contrib == 0 && 
@@ -3883,10 +3324,8 @@ inline void update_tg_load_sum(struct sched_entity *se, struct task_group *tg,
 		return;
 
 
-	if (unlikely(se->tg_load_sum_contrib != old)) {
-		__debug_tg_load_sum_contrib(__func__, "contrib!=old", se, tg, old, new, flag);
+	if (unlikely(se->tg_load_sum_contrib != old))
 		return;
-	}
 
 	if (unlikely(old == new))
 		return;
@@ -5768,57 +5207,6 @@ static inline void hrtick_update(struct rq *rq)
 #endif
 
 #ifdef CONFIG_GPFS
-#if DEBUG_LAGGED > 0
-static inline void
-__debug_update_eff_load(struct task_struct *p, unsigned long old, unsigned long new) {
-	__debug_gather(2,
-					rq_of(cfs_rq_of(&p->se)),
-					p,
-					old,
-					new,
-					p->se.on_rq,
-					0);
-/*	if (p->pid != 357)
-		return;
-
-	printk(KERN_ERR "[update_eff_load] cpu: %2d pid: %5d comm: %20s old: %5ld new: %ld on_rq: %d\n",
-				rq_of(cfs_rq_of(&p->se))->cpu, p->pid, p->comm, old, new, p->se.on_rq);*/
-}
-#else
-#define __debug_update_eff_load(...) do{}while(0)
-#endif
-
-#ifdef CONFIG_GPFS_VERBOSE
-static void
-__update_eff_load_errmsg(struct sched_entity *task_se, struct sched_entity *se)
-{
-	static unsigned long num_printk = 0;
-	struct task_struct *p;
-
-	num_printk++;
-
-	if (num_printk > 1000 && num_printk % 1000 != 0)
-		return;
-
-	p = task_of(task_se);
-	gpfs_msg("parent_effective_weight is uninitialized!" 
-		   " pid: %d comm: %s se->depth: %d group(id: %d level: %d)"
-		   " parent_group(id: %d level: %d) se->eff_weight: %ld se->weight: %ld parent->weight: %ld\n",
-			p->pid, p->comm, task_se->depth,
-			(se->my_q && se->my_q->tg && se->my_q->tg->css.cgroup)
-					? se->my_q->tg->css.cgroup->id : -1, 
-			(se->my_q && se->my_q->tg && se->my_q->tg->css.cgroup)
-					? se->my_q->tg->css.cgroup->level : -1,
-			(se->parent->my_q && se->parent->my_q->tg && se->parent->my_q->tg->css.cgroup)
-					? se->parent->my_q->tg->css.cgroup->id : -1,  
-			(se->parent->my_q && se->parent->my_q->tg && se->parent->my_q->tg->css.cgroup)
-					? se->parent->my_q->tg->css.cgroup->level : -1,
-			se->eff_load.weight, se->load.weight, se->parent->load.weight
-			);
-}
-#else
-#define __update_eff_load_errmsg(a, b) do{}while(0)
-#endif /* CONFIG_GPFS_VERBOSE */
 
 #ifdef CONFIG_GPFS_AMP
 static inline unsigned long
@@ -5864,7 +5252,6 @@ static inline int update_lagged_weight(struct sched_entity *pse) {
 	unsigned long lagged_weight = calc_lagged_weight(pse);
 
 	BUG_ON(!entity_is_task(pse));
-	__debug_update_eff_load(task_of(pse), pse->lagged_weight, lagged_weight);
 	
 	if (unlikely(lagged_weight == pse->lagged_weight))
 		return 0; /* not updated */
@@ -5922,8 +5309,7 @@ again:
 			parent_eff_weight_real = se->parent->eff_weight_real;
 			if (unlikely(parent_eff_weight == 0)) {
 				/* uninitialized. reset the whole path.         */
-				/* I think this is not possible, but, I fear... */
-				__update_eff_load_errmsg(pse, se); /* show error message */
+				/* It may not be possible. */
 				plast = NULL;
 				goto again;
 			}
@@ -10087,8 +9473,6 @@ int can_migrate_lagged_task(struct task_struct *p, struct lb_env *env)
 }
 
 #ifdef CONFIG_GPFS_AMP
-#define __debug_lagged_diff(...) do{}while(0)
-
 static inline 
 s64 __migration_benefit(s64 src_lagged, s64 dst_lagged, s64 prev_max, u64 target,
 							int src_type, int dst_type, struct sched_entity *se)
@@ -10322,7 +9706,6 @@ next:
 	return detached;
 }
 #else /* !CONFIG_GPFS_AMP - SMP version */
-//#define DEBUG_LAGGED_DIFF
 static struct task_struct *detach_one_lagged_task(struct lb_env *env)
 {
 	struct task_struct *p, *n, *min_p = NULL;
@@ -10358,79 +9741,6 @@ static struct task_struct *detach_one_lagged_task(struct lb_env *env)
 	return min_p;
 }
 
-#ifdef DEBUG_LAGGED_DIFF
-static s64 __debug_sort(s64 *data, u64 num) {
-	s64 min, sum = 0;
-	u64 idx, min_idx, complete;
-
-	for(complete = 0; complete < num; complete++) {
-		min_idx = complete;
-		min = data[complete];
-		for (idx = complete + 1; idx < num; idx++) {
-			if (data[idx] < min) {
-				min_idx = idx;
-				min = data[idx];
-			}
-		}
-		if (min_idx != complete) {
-			data[min_idx] = data[complete];
-			data[complete] = min;
-		}
-		sum += min;
-	}
-
-	return sum;
-}
-
-/* rq: src_rq
-   mode: -1 for initialization. 0 for input. 1 for output.*/
-static void __debug_lagged_diff(int mode, struct rq *rq, s64 lagged_diff) {
-	static struct diff_history {
-		atomic64_t idx;
-		atomic64_t total;
-		s64 diff[1022]; /* to align cache line...actually we will use 1000 elements */
-	} *data;
-	int cpu = rq ? rq->cpu : -1;
-
-	if (unlikely(mode == -1)) {
-		data = kmalloc(sizeof(struct diff_history) * 16, GFP_KERNEL);
-		for (cpu = 0; cpu < 16; cpu++) {
-			atomic64_set(&data[cpu].idx, 0);
-			atomic64_set(&data[cpu].total, 0);
-		}
-		return;
-	} else if (mode == 0) {
-		u64 idx;
-
-		lockdep_assert_held(&rq->lock);
-		idx = atomic64_read(&data[cpu].idx);
-		if (idx >= 1000)
-			return;
-		data[cpu].diff[idx] = lagged_diff / 1024;
-		atomic64_inc(&data[cpu].idx);
-	} else if (mode == 1 && atomic64_read(&data[cpu].idx) == 1000) {
-		u64 idx;
-		s64 diff_sum = 0;
-
-		idx = atomic64_cmpxchg(&data[cpu].idx, 1000, 1001);
-		if (idx != 1000)
-			return; /* some guy is now printing... */
-
-		diff_sum = __debug_sort(data[cpu].diff, 1000);
-		/* Note that printk can be problematic with rq->lock */
-		printk(KERN_ERR "[%s] cpu: %d %%tile: %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld avg: %lld.%03lld\n",
-					__func__, cpu,
-					data[cpu].diff[0], data[cpu].diff[100], data[cpu].diff[200], data[cpu].diff[300], 
-					data[cpu].diff[400], data[cpu].diff[500], data[cpu].diff[600], data[cpu].diff[700], 
-					data[cpu].diff[800], data[cpu].diff[900], data[cpu].diff[999],
-					diff_sum / 1000, diff_sum % 1000);
-		
-		atomic64_set(&data[cpu].idx, 0);
-	}
-}
-#else /* !DEBUG_LAGGED_DIFF */
-#define __debug_lagged_diff(...) do{}while(0)
-#endif /* !DEBUG_LAGGED_DIFF */
 static int detach_lagged_tasks(struct lb_env *env)
 {
 	struct list_head *tasks = &env->src_rq->cfs_tasks;
@@ -10456,9 +9766,6 @@ static int detach_lagged_tasks(struct lb_env *env)
 		src_lagged = rq_lagged(env->src_rq, target);
 		lagged_diff = src_lagged / 2;
 	}
-
-
-	__debug_lagged_diff(0, env->src_rq, lagged_diff);
 
 	/* source is faster than destination */
 	if (unlikely(lagged_diff <= 0)) {
@@ -10674,13 +9981,6 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 #endif
 	struct sched_domain *sd;
 	struct task_struct *p = NULL;
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	int src_activated = src_rq->active_balance == 2 ? 1 : 0;
-	//if (src_activated)
-	//	printk(KERN_ERR "do_src_active: src: %d dst: %d\n", src_cpu, dst_cpu);
-	if (src_activated)
-		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_START;
-#endif
 
 #ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
 	if (dst_cpu >= 0)
@@ -10709,10 +10009,6 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 	 * Bjorn Helgaas on a 128-cpu setup.
 	 */
 	BUG_ON(src_rq == dst_rq);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activated)
-		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_CONDITION;
-#endif
 
 	/* Search for an sd spanning us and the target CPU. */
 	rcu_read_lock();
@@ -10733,22 +10029,10 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 			.interval   = sd->vruntime->interval,
 			.idle		= CPU_IDLE,
 		};
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-//if (src_activated)
-//	printk(KERN_ERR "start_src_active: src: %d dst: %d\n", src_cpu, dst_cpu);
-	if (src_activated)
-		src_rq->src_active_mode = SRC_ACTIVE_BALANCE_DETACH;
-#endif
 
 		gpfs_stat_inc(sd, atb_count);
 
 		p = detach_one_lagged_task(&env);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-if (src_activated) {
-//	printk(KERN_ERR "detached_src_active: src: %d dst: %d p: %s\n", src_cpu, dst_cpu, !p ? "NULL" : p->comm);
-	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_DETACH_END;
-}
-#endif
 		if (p)
 			gpfs_stat_inc(sd, tb_gained[CPU_IDLE]);
 	}
@@ -10758,25 +10042,11 @@ out_unlock:
 	src_rq->active_balance = 0;
 	raw_spin_unlock(&src_rq->lock);
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-if (src_activated)
-	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_ATTACH_END;
-#endif
 	if (p)
 		attach_one_task(dst_rq, p);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-if (src_activated) {
-//	printk(KERN_ERR "attached_src_active: src: %d dst: %d p: %s\n", src_cpu, dst_cpu, !p ? "NULL" : p->comm);
-	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_ATTACH_END;
-}
-#endif
 
 	local_irq_enable();
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-if (src_activated)
-	src_rq->src_active_mode = SRC_ACTIVE_BALANCE_RETURN;
-#endif
 	return 0;
 }
 
@@ -10872,7 +10142,6 @@ redo:
 		cur_pulled_tasks = detach_lagged_tasks(&env);
 
 		raw_spin_unlock(&env.src_rq->lock);
-		__debug_lagged_diff(1, env.src_rq, 0);
 
 		if (cur_pulled_tasks) {
 			attach_tasks(&env);
@@ -11248,25 +10517,17 @@ static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
 #endif
 #ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
 	if (large_diff_sd && this_rq->nr_running > 1) {
-		//int dst_cpu = atomic_read(&large_diff_sd->vruntime->updated_by);
-		//if (dst_cpu >= 0 && dst_cpu != cpu_of(this_rq)) {
-			gpfs_stat_inc(this_rq, satb_cond);
-			/* if cpu_stopper->thread->on_cpu == 1, 
-			 * cpu_stopper may be the previous task,
-			 * then kernel/sched/core.c:try_to_wake_up()=>smp_cond_acquire(!p->on_cpu) causes infinite loop. */
-			if (!this_rq->active_balance && !cpu_stop_thread_on_cpu(cpu_of(this_rq))) {
-				this_rq->active_balance = 2;
-				//this_rq->push_cpu = dst_cpu;
-				this_rq->push_cpu = -large_diff_sd->level - 1;
-				do_active_balance = 1;
-				gpfs_stat_inc(this_rq, satb_try);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-				//printk(KERN_ERR "try_to_src_active: src: %d dst: %d\n", cpu_of(this_rq), dst_cpu);
-				this_rq->src_active_mode = SRC_ACTIVE_TRY;
-#endif
-				goto skip_fast_check;
-			}
-		//}
+		gpfs_stat_inc(this_rq, satb_cond);
+		/* if cpu_stopper->thread->on_cpu == 1, 
+		 * cpu_stopper may be the previous task,
+		 * then kernel/sched/core.c:try_to_wake_up()=>smp_cond_acquire(!p->on_cpu) causes infinite loop. */
+		if (!this_rq->active_balance && !cpu_stop_thread_on_cpu(cpu_of(this_rq))) {
+			this_rq->active_balance = 2;
+			this_rq->push_cpu = -large_diff_sd->level - 1;
+			do_active_balance = 1;
+			gpfs_stat_inc(this_rq, satb_try);
+			goto skip_fast_check;
+		}
 	} 
 #endif
 
@@ -11302,17 +10563,9 @@ skip_fast_check:
 
 #ifdef CONFIG_GPFS_SRC_ACTIVATED_BALANCING
 	if (do_active_balance) {
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-		//printk(KERN_ERR "queue_src_active: src: %d dst: %d\n", cpu_of(this_rq), this_rq->push_cpu);
-		this_rq->src_active_mode = SRC_ACTIVE_QUEUE;
-#endif
 		stop_one_cpu_nowait(cpu_of(this_rq),
 			active_target_vruntime_balance_cpu_stop, this_rq,
 			&this_rq->active_balance_work);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-		this_rq->src_active_mode = SRC_ACTIVE_QUEUE_DONE;
-		//printk(KERN_ERR "queued_src_active: src: %d dst: %d\n", cpu_of(this_rq), this_rq->push_cpu);
-#endif
 	} else /* call _target_vruntime_balance */
 #endif
 		pulled_tasks = _target_vruntime_balance(this_rq, idle);
@@ -12052,10 +11305,6 @@ static void task_fork_fair(struct task_struct *p)
 #ifndef CONFIG_GPFS	/* for GPFS, do not normalize vruntime based on min_vruntime */
 	se->vruntime -= cfs_rq->min_vruntime;
 #endif /* !CONFIG_GPFS */
-#ifdef CONFIG_GPFS_PRINTK_AT_FORK_AND_EXIT
-	pr_err("[%s] pid: %5d comm: %20s vruntmie: %16lld sum_exec: %16lld\n",
-			__func__, p->pid, p->comm, se->vruntime, se->sum_exec_runtime);
-#endif
 
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
@@ -12545,5 +11794,4 @@ __init void init_sched_fair_class(void)
 	cpu_notifier(sched_ilb_notifier, 0);
 #endif
 #endif /* SMP */
-	__debug_lagged_diff(-1, NULL, 0);
 }

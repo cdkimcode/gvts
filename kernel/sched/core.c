@@ -2056,40 +2056,15 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
 {
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	int src_activated = rq->src_active_mode == SRC_ACTIVE_CALL_TTWU_DO_ACTIVATE ? 1 : 0;
-#endif
 	lockdep_assert_held(&rq->lock);
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	BUG_ON(!p);
-	BUG_ON(!rq);
-#endif
 #ifdef CONFIG_SMP
 	if (p->sched_contributes_to_load)
 		rq->nr_uninterruptible--;
 #endif
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
-	//	printk(KERN_ERR "call_ttwu_active cpu: %d\n", cpu_of(rq));
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_ACTIVATE;
-#endif
 	ttwu_activate(rq, p, ENQUEUE_WAKEUP | ENQUEUE_WAKING);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
-	//	printk(KERN_ERR "call_ttwu_do_wakeup cpu: %d\n", cpu_of(rq));
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_DO_WAKEUP;
-#endif
 	ttwu_do_wakeup(rq, p, wake_flags);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	//if (unlikely(rq->active_balance == 2)) /* DEBUG */
-	//	printk(KERN_ERR "ret_ttwu_do_wakeup cpu: %d\n", cpu_of(rq));
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_RETURN_TTWU_DO_WAKEUP;
-#endif
 }
 
 /*
@@ -2223,9 +2198,6 @@ bool cpus_share_cache(int this_cpu, int that_cpu)
 static void ttwu_queue(struct task_struct *p, int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	int src_activated = rq->src_active_mode == SRC_ACTIVE_CALL_TTWU_QUEUE ? 1 : 0; 
-#endif
 
 #if defined(CONFIG_SMP)
 	if (sched_feat(TTWU_QUEUE) && !cpus_share_cache(smp_processor_id(), cpu)) {
@@ -2234,27 +2206,11 @@ static void ttwu_queue(struct task_struct *p, int cpu)
 		return;
 	}
 #endif
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_TTWU_QUEUE_START;
-#endif
 	raw_spin_lock(&rq->lock);
 	lockdep_pin_lock(&rq->lock);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_CALL_TTWU_DO_ACTIVATE;
-#endif
 	ttwu_do_activate(rq, p, 0);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_RETURN_TTWU_DO_ACTIVATE;
-#endif
 	lockdep_unpin_lock(&rq->lock);
 	raw_spin_unlock(&rq->lock);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activated)
-		rq->src_active_mode = SRC_ACTIVE_TTWU_QUEUE_END;
-#endif
 }
 
 /*
@@ -2368,11 +2324,6 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 {
 	unsigned long flags;
 	int cpu, success = 0;
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	int src_activate = task_rq(p)->src_active_mode == SRC_ACTIVE_QUEUE ? 1 : 0;
-	if (src_activate)
-		task_rq(p)->src_active_mode = SRC_ACTIVE_TTWU_START;
-#endif	
 
 	/*
 	 * If we are going to wake up a thread waiting for CONDITION we
@@ -2389,19 +2340,11 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	success = 1; /* we're going to change ->state */
 	cpu = task_cpu(p);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START2;
-#endif	
 
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
 #ifdef CONFIG_SMP
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START3;
-#endif	
 	/*
 	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
 	 * possible to, falsely, observe p->on_cpu == 0.
@@ -2435,37 +2378,17 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START4;
-#endif	
 	if (p->sched_class->task_waking)
 		p->sched_class->task_waking(p);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START5;
-#endif	
 
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START6;
-#endif
 	if (task_cpu(p) != cpu) {
 		wake_flags |= WF_MIGRATED;
 		set_task_cpu(p, cpu);
 	}
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_CALL_TTWU_QUEUE;
-#endif	
 	ttwu_queue(p, cpu);
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	if (src_activate)
-		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_RETURN_TTWU_QUEUE;
-#endif	
 stat:
 	if (schedstat_enabled())
 		ttwu_stat(p, cpu, wake_flags);
@@ -5735,7 +5658,6 @@ out_unlock:
 #endif /* CONFIG_GPFS_AMP */
 #endif /* CONFIG_GPFS */
 
-//#define DEBUG_GPFS_SYSCALL
 /* Definition of operations of fairamp system call */
 #define SET_FAST_CORE               0 /* obsolute */
 #define SET_SLOW_CORE               1 /* obsolute */
@@ -5760,9 +5682,6 @@ out_unlock:
  */
 SYSCALL_DEFINE4(fairamp, int, op, int, id, u64, num, void __user *, vars)
 {
-#ifdef DEBUG_GPFS_SYSCALL
-	printk(KERN_ERR "[SYS_FAIRAMP] op: %d id: %d num: %Ld\n", op, id, num); 
-#endif
 	switch(op) {
 #ifdef CONFIG_GPFS
 		/* for compatibility */
@@ -6851,14 +6770,14 @@ static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 
 #ifdef CONFIG_GPFS
 			if (parent->vruntime) {
-				struct sd_vruntime *sdv, *parent_sdv, *first_child, *last_child, *prev;
-				sdv = parent->vruntime;
-				parent_sdv = sdv->parent;
-				
+				struct sd_vruntime *sdv = parent->vruntime; /* to be deleted */
+				struct sd_vruntime *parent_sdv = sdv->parent;
+				struct sd_vruntime *first_child = sdv->child;
+				struct sd_vruntime *last_child = first_child;
+				struct sd_vruntime *prev;
+
 				/* children */
-				if (sdv->child) {
-					first_child = sdv->child;
-					last_child = first_child;
+				if (first_child) {
 					do {
 						last_child->parent = parent_sdv;
 						last_child = last_child->next;
@@ -6876,7 +6795,7 @@ static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 						while (prev->next != sdv)
 							prev = prev->next;
 
-						if (sdv->child) {
+						if (first_child) {
 							prev->next = first_child;
 							last_child->next = sdv->next;
 							if (parent_sdv->child == sdv)
@@ -7182,12 +7101,6 @@ build_sched_groups(struct sched_domain *sd, int cpu)
 	return 0;
 }
 
-#ifdef CONFIG_GPFS_SLOW
-#define GPFS_INTERVAL_SCALE 60
-#else
-#define GPFS_INTERVAL_SCALE 1
-#endif
-
 #ifdef CONFIG_GPFS
 /* show the structure of scheduing domains */
 static char cpu_str[nr_cpumask_bits + 1];
@@ -7275,14 +7188,14 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 
 	/* initialization */
 	atomic_set(&sdv->updated_by, -1);
-	atomic64_set(&sdv->target, sd->vruntime_interval * GPFS_INTERVAL_SCALE); /* start from the bottom */
-	sdv->interval = sd->vruntime_interval * GPFS_INTERVAL_SCALE;
-	sdv->tolerance = sd->vruntime_tolerance * GPFS_INTERVAL_SCALE;
+	atomic64_set(&sdv->target, sd->vruntime_interval); /* start from the bottom */
+	sdv->interval = sd->vruntime_interval;
+	sdv->tolerance = sd->vruntime_tolerance;
 	sdv->parent = NULL;
 	sdv->next = sdv;
 	sdv->child = NULL;
 #ifdef CONFIG_GPFS_MIN_TARGET
-	atomic64_set(&sdv->min_target, sd->vruntime_interval * GPFS_INTERVAL_SCALE);
+	atomic64_set(&sdv->min_target, sd->vruntime_interval);
 	atomic64_set(&sdv->min_child, (long) NULL);
 #endif
 	atomic64_set(&sdv->largest_idle_min_vruntime, 0);
@@ -8724,9 +8637,7 @@ void __init sched_init(void)
 		rq->active_balance = 0;
 		rq->next_balance = jiffies;
 		rq->push_cpu = 0;
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-		rq->src_active_mode = SRC_ACTIVE_NOT_INIT;
-#endif
+		
 		rq->cpu = i;
 		rq->online = 0;
 		rq->idle_stamp = 0;
