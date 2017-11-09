@@ -1302,7 +1302,7 @@ static void delete_min_target_rq(struct cfs_rq *cfs_rq) {
 
 	if (min_rq != cfs_rq)
 		return;
-	
+
 	/* min_rq == cfs_rq */
 	atomic64_set(&parent->min_child, (long) NULL);
 	if (atomic_read(&parent->nr_busy) > 0) {
@@ -1312,7 +1312,7 @@ static void delete_min_target_rq(struct cfs_rq *cfs_rq) {
 		u64 target, min_target = 0;
 		min_rq = NULL;
 
-		for_each_cpu(cpu, to_cpumask(parent->span)) {
+		for_each_cpu(cpu, sd_vruntime_span(parent)) {
 			if (cpu == this_cpu)
 				continue;
 			if (idle_cpu(cpu))
@@ -4358,7 +4358,6 @@ __gpfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttl
 
 	/*printk(KERN_ERR "pid: %d comm: %s vruntime: %lld -> %lld sleep_start: %lld sleep_target: %lld min_target: %lld\n",
 			task_of(se)->pid, task_of(se)->comm, se->vruntime, vruntime, se->sleep_start, se->sleep_target, target); */
-	BUG_ON(vruntime < se->vruntime);
 #ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
 	se->num_normalization++;
 	se->added_normalization += vruntime - se->vruntime;
@@ -4445,7 +4444,6 @@ __gpfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttl
 	if (vruntime_passed(se->vruntime, vruntime))
 		goto out;	
 
-	BUG_ON(vruntime < se->vruntime);
 #ifdef CONFIG_GPFS_DEBUG_NORMALIZATION
 	se->num_normalization++;
 	se->added_normalization += vruntime - se->vruntime;
@@ -6851,6 +6849,23 @@ static int cpu_util(int cpu)
 }
 
 #ifdef CONFIG_GPFS_DISABLE_ORIGINAL_BALANCING
+/* return the target vruntime value
+   even if the sched_domain is not linked with sd_vruntime. */
+static inline
+u64 get_sd_target(struct sched_domain *sd) {
+	if (sd->vruntime)
+		return atomic64_read(&sd->vruntime->target);
+	else {
+		/* if sd does not have vruntime, use its nearest parent's vruntime. */
+		sd = sd->parent;
+		while (unlikely(sd && !sd->vruntime))
+			sd = sd->parent;
+		if (likely(sd))
+			return atomic64_read(&sd->vruntime->target);
+		else
+			return 0;
+	}
+}
 /* TODO: this implementation assumes that A and B have same span_weight. plz fix this. */
 /* if group A is more idle than group B, return 1. Otherwise, return 0 */
 static inline int who_is_idle_group(s64 lagged_a, int idle_a, s64 lagged_b, int idle_b) {
@@ -6870,7 +6885,7 @@ find_fastest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 	/* if local group has no allowed cpu, this_lagged should not be selected. */
 	s64 min_lagged = LLONG_MAX, this_lagged = LLONG_MAX;
 	int min_idle = -1, this_idle = -1;
-	u64 target = atomic64_read(&sd->vruntime->target);
+	u64 target = get_sd_target(sd); 
 
 	do {
 		s64 lagged;
@@ -6934,7 +6949,7 @@ static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group,
 #endif
 	int i;
 
-	target = atomic64_read(&sd->vruntime->target);
+	target = get_sd_target(sd);
 
 	/* Traverse only the allowed CPUs */
 	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) 
@@ -9625,8 +9640,8 @@ void set_min_vruntime_idle_to_busy(struct rq *rq)
 void set_min_vruntime_idle_to_busy(struct rq *rq)
 {
 	int this_cpu = rq->cpu;
-	struct sched_domain *sd, *highest_sd = NULL;
-	struct sched_domain *sd_lowest_busy = NULL;
+	struct sd_vruntime *highest_sdv = NULL;
+	struct sd_vruntime *sdv_lowest_busy = NULL;
 	struct sd_vruntime *sdv, *curr, *largest_curr;
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	int updated_by;
@@ -9646,33 +9661,34 @@ void set_min_vruntime_idle_to_busy(struct rq *rq)
 	if (delta < (rq->cfs.target_interval / 2))
 		return;
 
-	for_each_domain(this_cpu, sd) {
-		highest_sd = sd;
-		if (!sd_lowest_busy
-				&& atomic_read(&sd->vruntime->nr_busy) > 0)
-			sd_lowest_busy = sd;
+	for (sdv = rq->sd_vruntime; sdv; sdv = sdv->parent) {
+		highest_sdv = sdv;
+		if (!sdv_lowest_busy
+				&& atomic_read(&sdv->nr_busy) > 0)
+			sdv_lowest_busy = sdv;
 	}
-	if (!sd_lowest_busy)
-		sd_lowest_busy = highest_sd;
+	
+	if (!sdv_lowest_busy)
+		sdv_lowest_busy = highest_sdv;
 	
 	/* initialization phase was filtered by rq->sd_vruntime == NULL above. */
-	BUG_ON(!highest_sd); 
+	BUG_ON(!highest_sdv); 
 	
 retry:
 	min_vruntime = cfs_rq->min_vruntime;
-	sdv = sd_lowest_busy->vruntime;
+	sdv = sdv_lowest_busy;
 
 	/* get idle_vruntime */
-	idle_vruntime = (u64) atomic64_read(&highest_sd->vruntime->largest_idle_min_vruntime);
+	idle_vruntime = (u64) atomic64_read(&highest_sdv->largest_idle_min_vruntime);
 
 	/* if all domains are idle */
-	if (atomic_read(&highest_sd->vruntime->nr_busy) == 0) {
+	if (atomic_read(&highest_sdv->nr_busy) == 0) {
 		all_domains_are_idle = 1;
 		goto out;
 	}
 
 	/* get busy_vruntime */
-	updated_by = -1; /* sd_lowest_busy->vruntime->child == NULL */
+	updated_by = -1; /* sdv_lowest_busy->child == NULL */
 	while (sdv->child) {
 		updated_by = atomic_read(&sdv->updated_by);
 		if (updated_by < 0)
@@ -9700,7 +9716,7 @@ next:
 		if (!largest_curr) {
 			/* racing occurred! The domain is actually idle */
 			/* Go to the top level and retry */
-			sd_lowest_busy = highest_sd;
+			sdv_lowest_busy = highest_sdv;
 			goto retry;
 		}
 		sdv = largest_curr;
@@ -9729,7 +9745,7 @@ out:
 				 __func__,
 				 all_domains_are_idle ? "all_domains_are_idle" : "some_domains_are_busy",
 				 this_cpu,
-				 sd_lowest_busy ? sd_lowest_busy->level : -1, 
+				 sdv_lowest_busy ? sdv_lowest_busy->level : -1, 
 				 min_vruntime, idle_vruntime, busy_vruntime);
 #endif
 
@@ -9767,6 +9783,8 @@ void transit_idle_to_busy(struct rq *rq)
 
 	for_each_lower_domain(sd) {
 		sdv = sd->vruntime;
+		if (!sdv)
+			continue;
 		atomic_inc(&sdv->nr_busy);
 	}
 	rcu_read_unlock();
@@ -9796,6 +9814,8 @@ void transit_busy_to_idle(struct rq *rq) {
 	rcu_read_lock();
 	for_each_domain(this_cpu, sd) {
 		sdv = sd->vruntime;
+		if (!sdv)
+			continue;
 
 		/* check updated_by */
 		if (atomic_read(&sdv->updated_by) == this_cpu) {
@@ -9855,12 +9875,15 @@ static inline int who_is_busy_group(s64 lagged_a, int busy_a, s64 lagged_b, int 
 		return 0;
 }
 
-static struct sched_group *
-find_most_lagged_group(struct lb_env *env) {
-	struct sched_domain *sd = env->sd;
-	struct sched_group *busiest = NULL, *group = sd->groups;
+static struct sd_vruntime *
+find_most_lagged_child(struct lb_env *env) {
+	struct sd_vruntime *sdv = env->sd->vruntime;
+	struct sd_vruntime *busiest = NULL, *child = sdv->child;
 	s64 max_lagged = LLONG_MIN, this_lagged = LLONG_MIN;
 	int max_busy = -1, this_busy = 0;
+
+	if (child == NULL)
+		return sdv;
 
 	do {
 		s64 lagged;
@@ -9875,19 +9898,19 @@ find_most_lagged_group(struct lb_env *env) {
 #endif
 
 		local_group = cpumask_test_cpu(env->dst_cpu,
-							sched_group_cpus(group));
+							sd_vruntime_span(child));
 
 		lagged_sum = 0;
 		num_busy = 0;
 		sum_nr_running = 0;
 
-		for_each_cpu(i, sched_group_cpus(group)) {
+		for_each_cpu(i, sd_vruntime_span(child)) {
 			if (idle_cpu(i))
 				continue;
 			/* to prevent overflow, divide the lagged value with group_weight.
 			   it's like an average value. */
 			rq = cpu_rq(i);
-			lagged = rq_lagged(rq, env->target) / group->group_weight;
+			lagged = rq_lagged(rq, env->target) / child->nr_cpus;
 			lagged_sum += lagged;
 			num_busy++;
 			sum_nr_running += rq->cfs.h_nr_running;
@@ -9905,10 +9928,10 @@ find_most_lagged_group(struct lb_env *env) {
 // TODO: include cpu_type < dst_rq->cpu_type => ignore sum_nr_running condition
 #ifdef CONFIG_GPFS_AMP_AGGRESSIVE
 		if (min_cpu_type >= env->dst_rq->cpu_type 
-				&& sum_nr_running < group->group_weight)
+				&& sum_nr_running < child->nr_cpus)
 			continue;
 #else /* !CONFIG_GPFS_AMP_AGGRESSIVE */
-		if (sum_nr_running < group->group_weight)
+		if (sum_nr_running < child->nr_cpus)
 			continue;
 #endif /* !CONFIG_GPFS_AMP_AGGRESSIVE */
 
@@ -9925,9 +9948,9 @@ find_most_lagged_group(struct lb_env *env) {
 		if (who_is_busy_group(lagged_sum, num_busy, max_lagged, max_busy)) {
 			max_lagged = lagged_sum;
 			max_busy = num_busy;
-			busiest = group;
+			busiest = child;
 		}
-	} while (group = group->next, group != sd->groups);
+	} while (child = child->next, child != sdv->child);
 
 	if (!busiest)
 		return NULL;
@@ -9942,7 +9965,7 @@ find_most_lagged_group(struct lb_env *env) {
 }
 
 static struct rq *find_most_lagged_rq(struct lb_env *env, 
-					struct sched_group *group) 
+					struct sd_vruntime *sdv) 
 {
 	int cpu;
 	s64 this_lagged;
@@ -9961,7 +9984,7 @@ static struct rq *find_most_lagged_rq(struct lb_env *env,
 	}
 	max_lagged = this_lagged;
 
-	for_each_cpu_and(cpu, sched_group_cpus(group), env->cpus) {
+	for_each_cpu_and(cpu, sd_vruntime_span(sdv), env->cpus) {
 		gpfs_stat_inc(env->sd, lagged_count[env->idle]);
 		rq = cpu_rq(cpu);
 #ifdef CONFIG_GPFS_AMP_AGGRESSIVE
@@ -10567,16 +10590,11 @@ static int find_dst_cpu(int __sd_level, int src_cpu) {
 	u64 target;
 
 	for_each_domain(src_cpu, sd) {
-		sd_level--;
-		if (sd_level < 0)
+		if (sd->level == sd_level)
 			break;
 	}
 
-	if (unlikely(sd_level >= 0 || !sd)) {/* error */
-		printk(KERN_ERR "[%s] ERROR cannot find sched domain src: %d sd_level: %d -> %d\n", 
-							__func__, src_cpu, -(__sd_level + 1), sd_level);
-		return -1;
-	}
+	BUG_ON(!sd);
 
 	/* similar to find_fastest_cpu() */
 	target = atomic64_read(&sd->vruntime->target);
@@ -10699,7 +10717,7 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 	/* Search for an sd spanning us and the target CPU. */
 	rcu_read_lock();
 	for_each_domain(dst_cpu, sd) {
-		if ((sd->flags & SD_LOAD_BALANCE) &&
+		if (sd->vruntime &&
 			cpumask_test_cpu(src_cpu, sched_domain_span(sd)))
 				break;
 	}
@@ -10772,7 +10790,7 @@ static int __target_vruntime_balance(int this_cpu, struct rq *this_rq,
 {
 	int pulled_tasks = 0, cur_pulled_tasks;
 	int need_active_balance = 0, do_active_balance = 0;
-	struct sched_group *group;
+	struct sd_vruntime *child;
 	
 	struct rq *lagged_rq;
 	unsigned long flags;
@@ -10798,11 +10816,19 @@ static int __target_vruntime_balance(int this_cpu, struct rq *this_rq,
 	/* if (idle == CPU_NOT_IDLE)
 		env.target -= tolerance; */
 #endif
+//printk(KERN_ERR "[%s](%d) 0\n", __func__, this_cpu);
 	
 	cpumask_and(cpus, cpu_active_mask, sched_domain_span(sd));
 #ifdef CONFIG_GPFS_BALANCING_IGNORE_LOCAL_GROUP
 	/* since local group balancing was considered at lower level domain. */
-	cpumask_andnot(cpus, cpus, sched_group_cpus(sd->groups));
+	if (sd->vruntime->child == NULL)
+		cpumask_clear_cpu(this_cpu, cpus);
+	else {
+		struct sched_domain *sd_child = sd->child;
+		while (sd_child && sd_child->vruntime == NULL)
+			sd_child = sd_child->child;
+		cpumask_andnot(cpus, cpus, sd_vruntime_span(sd_child->vruntime));
+	}
 #else
 	cpumask_clear_cpu(this_cpu, cpus);
 #endif
@@ -10810,12 +10836,13 @@ static int __target_vruntime_balance(int this_cpu, struct rq *this_rq,
 
 redo:
 
-	group = find_most_lagged_group(&env);
-	if (group == NULL) {
+	child = find_most_lagged_child(&env);
+	if (child == NULL) {
 		gpfs_stat_inc(sd, tb_nolaggedgroup[idle]);
 		goto out_balanced;
 	}
-	lagged_rq = find_most_lagged_rq(&env, group);
+
+	lagged_rq = find_most_lagged_rq(&env, child);
 	if (lagged_rq == NULL) {
 		gpfs_stat_inc(sd, tb_nolaggedcpu[idle]);
 		goto out_balanced;
@@ -10971,6 +10998,9 @@ static int _target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle_
 	
 	rcu_read_lock();
 	for_each_domain(this_cpu, sd) {
+		if (!sd->vruntime)
+			continue;
+
 		sd_vruntime = sd->vruntime;
 		target = atomic64_read(&sd_vruntime->target);
 		interval = sd_vruntime->interval;
@@ -11102,8 +11132,11 @@ static u64 check_target_diff(struct rq *rq, struct sched_domain **large_diff_sd)
 	rcu_read_lock();
 	for_each_domain(cpu, sd) {
 		sd_vruntime = sd->vruntime;
+		if (!sd_vruntime)
+			continue;
 		target = atomic64_read(&sd_vruntime->target);
 		interval = sd_vruntime->interval;
+
 		if (target > my_target) {
 			diff = (target - my_target) / interval;
 #if defined(CONFIG_GPFS_SRC_ACTIVATED_BALANCING) || defined(CONFIG_GPFS_INFEASIBLE_WEIGHT)
@@ -11139,6 +11172,11 @@ void check_infeasible_weight(struct rq *this_rq, u64 max_diff, struct sched_doma
 			this_rq->infeasible_weight = 0;
 		return;
 	}
+
+#if CONFIG_GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT < CONFIG_GPFS_TARGET_DIFF_THRESHOLD
+	if (unlikely(!sd))
+		return;
+#endif
 
 	if (this_rq->cfs.h_nr_running > 1)
 		return;
@@ -11267,7 +11305,6 @@ skip_fast_check:
 #ifdef CONFIG_DEBUG_SRC_ACTIVE
 		//printk(KERN_ERR "queue_src_active: src: %d dst: %d\n", cpu_of(this_rq), this_rq->push_cpu);
 		this_rq->src_active_mode = SRC_ACTIVE_QUEUE;
-		BUG_ON(!this_rq);
 #endif
 		stop_one_cpu_nowait(cpu_of(this_rq),
 			active_target_vruntime_balance_cpu_stop, this_rq,

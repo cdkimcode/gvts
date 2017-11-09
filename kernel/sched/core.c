@@ -2448,7 +2448,6 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
 #ifdef CONFIG_DEBUG_SRC_ACTIVE
-	/* DEBUG */ BUG_ON(cpu < 0 || cpu > 15);
 	if (src_activate)
 		cpu_rq(cpu)->src_active_mode = SRC_ACTIVE_TTWU_START6;
 #endif
@@ -2537,9 +2536,6 @@ out:
  */
 int wake_up_process(struct task_struct *p)
 {
-#ifdef CONFIG_DEBUG_SRC_ACTIVE
-	/* DEBUG */ BUG_ON(!p);
-#endif
 	return try_to_wake_up(p, TASK_NORMAL, 0);
 }
 EXPORT_SYMBOL(wake_up_process);
@@ -6729,6 +6725,10 @@ static void free_sched_domain(struct rcu_head *rcu)
 		kfree(sd->groups->sgc);
 		kfree(sd->groups);
 	}
+#if 0
+	if (sd->vruntime && atomic_dec_and_test(&sd->vruntime->ref))
+		kfree(sd->vruntime);
+#endif
 	kfree(sd);
 }
 
@@ -6796,9 +6796,9 @@ cpu_attach_sdv(struct rq *rq, struct sched_domain *sd) {
 		sd = sd->parent;
 	/* Now, @sd is NULL or the lowest sched_domain which has sd_vruntime */
 
-	if (!sd)
+	if (!sd) {
 		rcu_assign_pointer(rq->sd_vruntime, NULL);
-	else {
+	} else {
 		sdv = sd->vruntime;
 		while (sdv) {
 			sdv->level = level++;
@@ -6827,14 +6827,8 @@ cpu_attach_sdv(struct rq *rq, struct sched_domain *sd) {
 }
 #endif /* CONFIG_GPFS */
 
-/*
- * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
- * hold the hotplug lock.
- */
-static void
-cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 {
-	struct rq *rq = cpu_rq(cpu);
 	struct sched_domain *tmp;
 
 	/* Remove the sched domains which do not contribute to scheduling. */
@@ -6857,22 +6851,49 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 
 #ifdef CONFIG_GPFS
 			if (parent->vruntime) {
-				struct sd_vruntime *sdv, *parent_sdv, *child_sdv;
+				struct sd_vruntime *sdv, *parent_sdv, *first_child, *last_child, *prev;
 				sdv = parent->vruntime;
 				parent_sdv = sdv->parent;
-
-				if (parent_sdv) {
-					parent_sdv->child = sdv->child;
-				} 
-				child_sdv = sdv->child;
-				if (child_sdv) {
-					sdv = child_sdv; /* the first child_sdv */
+				
+				/* children */
+				if (sdv->child) {
+					first_child = sdv->child;
+					last_child = first_child;
 					do {
-						child_sdv->parent = parent_sdv;
-						child_sdv = child_sdv->next;
-					} while (child_sdv != sdv);
+						last_child->parent = parent_sdv;
+						last_child = last_child->next;
+					} while (last_child != first_child);
+
 				}
-				atomic_set(&parent->vruntime->ref, 0);
+
+				/* parent */
+				if (parent_sdv) {
+					if (parent_sdv->child->next == parent_sdv->child) {
+						/* one element, and it's me */
+						parent_sdv->child = sdv->child;
+					} else {
+						prev = sdv->next;
+						while (prev->next != sdv)
+							prev = prev->next;
+
+						if (sdv->child) {
+							prev->next = first_child;
+							last_child->next = sdv->next;
+							if (parent_sdv->child == sdv)
+								parent_sdv->child = first_child;
+						} else {
+							prev->next = sdv->next;
+						}
+					}
+
+				}
+
+				/* unlink to prevent removing this entry again
+				   that is, prevent running the code above repeatedly (cause error) */
+				sdv->child = NULL;
+				sdv->parent = NULL;
+
+				atomic_dec(&sdv->ref);
 				parent->vruntime = NULL;
 			}
 #endif /* CONFIG_GPFS */
@@ -6884,15 +6905,33 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	if (sd && sd_degenerate(sd)) {
 #ifdef CONFIG_GPFS
 		if (sd->vruntime) {
-			struct sd_vruntime *sdv, *parent_sdv;
+			struct sd_vruntime *sdv, *parent_sdv, *prev;
 			sdv = sd->vruntime;
 			parent_sdv = sdv->parent;
 
+			/* parent */
 			if (parent_sdv) {
-				parent_sdv->child = NULL;
+				if (parent_sdv->child->next == parent_sdv->child) {
+					/* one element */
+					/* no child at the bottom */
+					parent_sdv->child = NULL;
+				} else {
+					prev = sdv->next;
+					while (prev->next != sdv)
+						prev = prev->next;
+
+					/* no child at the bottom */
+					prev->next = sdv->next;
+
+					if (parent_sdv->child == sdv)
+						parent_sdv->child = sdv->next;
+				}
 			}
 
-			atomic_set(&sd->vruntime->ref, 0);
+			sdv->parent = NULL;
+			sdv->child = NULL;
+
+			atomic_dec(&sdv->ref);
 			sd->vruntime = NULL;
 		}
 #endif /* CONFIG_GPFS */
@@ -6904,6 +6943,19 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	}
 
 	sched_domain_debug(sd, cpu);
+
+	return sd;
+}
+
+/*
+ * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
+ * hold the hotplug lock.
+ */
+static void
+cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+	struct sched_domain *tmp;
 
 	rq_attach_root(rq, rd);
 	tmp = rq->sd;
@@ -7192,7 +7244,6 @@ build_overlap_sd_vruntime(struct sched_domain *sd, int cpu)
 		/* child_head_cpu == head_cpu */
 		child_sdd = (struct sd_data *) (child_sd->private);
 		sdv->child = *per_cpu_ptr(child_sdd->sdv, head_cpu);
-		atomic_inc(&sdv->child->ref);
 	}
 
 	/* no parents since this sdv covers all cpus */
@@ -7243,7 +7294,6 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 		/* child_head_cpu == head_cpu */
 		child_sdd = (struct sd_data *) (child_sd->private);
 		sdv->child = *per_cpu_ptr(child_sdd->sdv, head_cpu);
-		atomic_inc(&sdv->child->ref);
 	}
 
 	if (!parent_sd)
@@ -7260,7 +7310,6 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 
 	parent_sdd = (struct sd_data *) (parent_sd->private);
 	sdv->parent = *per_cpu_ptr(parent_sdd->sdv, parent_head_cpu);
-	atomic_inc(&sdv->parent->ref);
 
 	last = sdv->parent->child;
 	if (last == NULL) {
@@ -7270,7 +7319,6 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 		while (last->next != sdv->parent->child)
 			last = last->next;
 		last->next = sdv;
-		atomic_inc(&last->ref);
 		sdv->next = sdv->parent->child;
 	}
 	return 0;
@@ -8070,17 +8118,6 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		}
 	}
 
-	/* Calculate CPU capacity for physical packages and nodes */
-	for (i = nr_cpumask_bits-1; i >= 0; i--) {
-		if (!cpumask_test_cpu(i, cpu_map))
-			continue;
-
-		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
-			claim_allocations(i, sd);
-			init_sched_groups_capacity(i, sd);
-		}
-	}
-
 #ifdef CONFIG_GPFS
 	/* build sd_vruntime */
 	for_each_cpu(i, cpu_map) {
@@ -8097,14 +8134,77 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 	}
 #endif
 
-#ifdef CONFIG_GPFS
-//#if 0 // To show sdv topology while booting 
-	for_each_cpu(i, cpu_map) {
+	/* Calculate CPU capacity for physical packages and nodes */
+	for (i = nr_cpumask_bits-1; i >= 0; i--) {
+		if (!cpumask_test_cpu(i, cpu_map))
+			continue;
+
 		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
-			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p\n", 
+			claim_allocations(i, sd);
+			init_sched_groups_capacity(i, sd);
+		}
+	}
+
+
+#ifdef CONFIG_GPFS
+#if 0 // To show sdv topology while booting 
+	for_each_cpu(i, cpu_map) {
+		int level = 0;
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p target: %ld interval: %lld\n", 
 						i, sd->name,
 						cpumask_str(sched_domain_span(sd)),
-						sd->vruntime ? sd->vruntime->level : -1,
+						sd->vruntime ? level : -1,
+						sd->vruntime ? sd->vruntime->nr_cpus : -1,
+						sd->vruntime ? sd->vruntime->child ? sd->vruntime->child->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? sd->vruntime->parent ? sd->vruntime->parent->nr_cpus : -2 
+									: -1,
+						sd->vruntime ? cpumask_str(sd_vruntime_span(sd->vruntime)) : "NULL",
+						sd->vruntime,
+						sd->vruntime ? sd->vruntime->next : NULL,
+						sd->vruntime ? sd->vruntime->child : NULL,
+						sd->vruntime ? sd->vruntime->parent : NULL,
+						sd->vruntime ? atomic64_read(&sd->vruntime->target) : -1,
+						sd->vruntime ? sd->vruntime->interval : -1);
+			if (!sd->vruntime)
+				continue;
+			level++;
+		}
+	}
+#endif
+#endif
+
+	/* Clean up the unnecessary domains */
+	for_each_cpu(i, cpu_map) {
+		sd = *per_cpu_ptr(d.sd, i);
+		sd = cpu_merge_domain(sd, i);
+		*per_cpu_ptr(d.sd, i) = sd;
+	}
+
+#ifdef CONFIG_GPFS
+#if 0
+	/* build sd_vruntime */
+	for_each_cpu(i, cpu_map) {
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			if (sd->flags & SD_OVERLAP) {
+				if (build_overlap_sd_vruntime(sd, i))
+					goto error;
+				break;
+			} else {
+				if (build_sd_vruntime(sd, i))
+					goto error;
+			}
+		}
+	}
+#endif
+	for_each_cpu(i, cpu_map) {
+		int level = 0;
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+//#if 0 // To show sdv topology while booting 
+			printk(KERN_ERR "[%02d] sched_domain_vruntime name: %4s level: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p\n", 
+						i, sd->name,
+						sd->vruntime ? level : -1,
 						sd->vruntime ? sd->vruntime->nr_cpus : -1,
 						sd->vruntime ? sd->vruntime->child ? sd->vruntime->child->nr_cpus : -2 
 									: -1,
@@ -8116,6 +8216,9 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 						sd->vruntime ? sd->vruntime->child : NULL,
 						sd->vruntime ? sd->vruntime->parent : NULL);
 //#endif
+			if (!sd->vruntime)
+				continue;
+			level++;
 		}
 	}
 #endif
@@ -8130,10 +8233,10 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 	ret = 0;
 
 #ifdef CONFIG_GPFS
-//#if 0 // To show sdv topology while booting 
+#if 0 // To show sdv topology while booting 
 	for_each_cpu(i, cpu_map) {
-		for_each_domain(i, sd) {
-			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p\n", 
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			printk(KERN_ERR "[%02d] SDV show name: %4s span: %40s sdv lvl: %2d weight: %2d child: %2d parent: %2d span: %40s ptr: %16p next: %16p child: %16p parent: %16p target: %ld interval: %lld\n", 
 						i, sd->name,
 						cpumask_str(sched_domain_span(sd)),
 						sd->vruntime ? sd->vruntime->level : -1,
@@ -8146,11 +8249,16 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 						sd->vruntime,
 						sd->vruntime ? sd->vruntime->next : NULL,
 						sd->vruntime ? sd->vruntime->child : NULL,
-						sd->vruntime ? sd->vruntime->parent : NULL);
-//#endif
+						sd->vruntime ? sd->vruntime->parent : NULL,
+						sd->vruntime ? atomic64_read(&sd->vruntime->target) : -1,
+						sd->vruntime ? sd->vruntime->interval : -1);
+			if (!sd->vruntime)
+				continue;
 		}
 	}
 #endif
+#endif
+
 
 error:
 	__free_domain_allocs(&d, alloc_state, cpu_map);
