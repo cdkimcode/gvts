@@ -1,7 +1,7 @@
 VERSION = 4
 PATCHLEVEL = 6
 SUBLEVEL = 4
-EXTRAVERSION = -gpfs
+EXTRAVERSION = -gvfs
 NAME = Charred Weasel
 
 # To prevent adding plus sign

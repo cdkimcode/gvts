@@ -649,7 +649,7 @@ static void check_stack_usage(void)
 static inline void check_stack_usage(void) {}
 #endif
 
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 void remember_task_exit(struct task_struct *p);
 #endif
 
@@ -658,7 +658,7 @@ void do_exit(long code)
 	struct task_struct *tsk = current;
 	int group_dead;
 	TASKS_RCU(int tasks_rcu_i);
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	remember_task_exit(tsk);
 #endif
 	profile_task_exit(tsk);

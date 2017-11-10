@@ -787,11 +787,11 @@ config BUILD_BIN2C
 	bool
 	default n
 
-config GPFS
+config GVFS
 	bool "Group-aware Performance Fair Scheduler by CDKIM"
 	default y
 	help
-		Include GPFS_EFF_WEIGHT2 and GPFS_CONSIDER_LOAD
+		Include GVFS_EFF_WEIGHT2 and GVFS_CONSIDER_LOAD
 		   * Effective weight for vruntime update with the real-time sum of load
 		   * Use real-time sum of load to calculate effective weight
 		   * Consider load of tasks during vruntime balancing
@@ -812,7 +812,7 @@ config GPFS
 		Actually, load balancing tries to all cpus reach
 		the next target as simultaneously as possible.
 
-config GPFS_MIN_TARGET
+config GVFS_MIN_TARGET
 	bool "Manage and apply the minimum target vruntime of level-0"
 	default y
 	help
@@ -820,10 +820,10 @@ config GPFS_MIN_TARGET
 		of child sdvruntimes.
 		The minimum value used for waking up tasks and waking up CPUs.
 
-config GPFS_NORMAL_V2
+config GVFS_NORMAL_V2
     bool "Use 2nd version of vruntime normalization for slept or throttled tasks"
 	default y
-	depends on GPFS_MIN_TARGET
+	depends on GVFS_MIN_TARGET
 	help
 	    The first version use a heuristic algorithm.
 		- Ignore short sleeps
@@ -831,164 +831,164 @@ config GPFS_NORMAL_V2
 		The second version use the utilization based algorithm
 		- vruntime += (increase of target from sleep) * (SCHED_LOAD_SCALE - util_avg) / SCHED_LOAD_SCALE
 
-config GPFS_BANDWIDTH
-	bool "Support for bandwidth control in GPFS"
+config GVFS_BANDWIDTH
+	bool "Support for bandwidth control in GVFS"
 	default y
-	depends on GPFS && CFS_BANDWIDTH
+	depends on GVFS && CFS_BANDWIDTH
 	help
-		Support for bandwidth control (CFS_BANDWIDTH) in GPFS
+		Support for bandwidth control (CFS_BANDWIDTH) in GVFS
 
-config GPFS_AMP
-	bool "AMP support of GPFS"
+config GVFS_AMP
+	bool "AMP support of GVFS"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
-		GPFS for AMP.
+		GVFS for AMP.
 		efficiency (and efficiency modes) for tasks.
 		define cpu types for each rq.
 		minimize max(lagged_src, lagged_dst) at targer vruntime balancing.
 
-config GPFS_AMP_NO_HZ
-	bool "NOHZ support of GPFS AMP"
+config GVFS_AMP_NO_HZ
+	bool "NOHZ support of GVFS AMP"
 	default y
-	depends on GPFS && GPFS_AMP && NO_HZ_COMMON
+	depends on GVFS && GVFS_AMP && NO_HZ_COMMON
 	help
-		faster-core-first for NOHZ of GPFS_AMP
+		faster-core-first for NOHZ of GVFS_AMP
 
-config GPFS_AMP_AGGRESSIVE
-	bool "Aggressivle balancing for GPFS with AMP support"
+config GVFS_AMP_AGGRESSIVE
+	bool "Aggressivle balancing for GVFS with AMP support"
 	default y
-	depends on GPFS_AMP
+	depends on GVFS_AMP
 	help
 		Try to balance even if only 1 task at source runqueue.
 
-config GPFS_DEBUG_NORMALIZATION
+config GVFS_DEBUG_NORMALIZATION
 	bool "Debug normalization of vruntime"
 	default n
-	depends on GPFS
+	depends on GVFS
 	help
 		Debug information for virtual time normalization when a task is waking up
 
-config GPFS_NUM_CPU_TYPES
+config GVFS_NUM_CPU_TYPES
 	int "Number of CPU types"
 	range 1 16
 	default 2
-	depends on GPFS_AMP
+	depends on GVFS_AMP
 	help
-		The number of CPU types supported by GPFS.
+		The number of CPU types supported by GVFS.
 
-config GPFS_BASE_CPU_TYPE
+config GVFS_BASE_CPU_TYPE
 	int "CPU type id for the base performance"
 	range -1 15
-	depends on GPFS_AMP
+	depends on GVFS_AMP
 	default -1
 	help
 		The CPU type id used to define the base performance.
-		This value should be smaller than GPFS_NUM_CPU_TYPES
+		This value should be smaller than GVFS_NUM_CPU_TYPES
 		If this says -1, FAIR_SHARE is used.
 		FAIR_SHARE = SUM(num_type_i_cpus * efficiency[i]) / SUM(num_type_i_cpus)
 
-config GPFS_STATS
-	bool "Schedstats for GPFS"
+config GVFS_STATS
+	bool "Schedstats for GVFS"
 	default y
-	depends on GPFS && SCHEDSTATS
+	depends on GVFS && SCHEDSTATS
 	help
-		Various statistics for debugging GPFS
+		Various statistics for debugging GVFS
 
-config GPFS_VERBOSE
-	bool "Some warning messages from GPFS"
+config GVFS_VERBOSE
+	bool "Some warning messages from GVFS"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
-		Some warning messages from GPFS.
+		Some warning messages from GVFS.
 		The messages are rare, but do not select this option
 		if you want optimize the code size as much as possible.
 
-config GPFS_INTERVAL_SMT_SHARED
+config GVFS_INTERVAL_SMT_SHARED
 	int "Target interval for cores sharing pipelines (ms)"
 	range 1 3000
-	depends on GPFS
+	depends on GVFS
 	default 30
 
-config GPFS_INTERVAL_LLC_SHARED
+config GVFS_INTERVAL_LLC_SHARED
 	int "Target interval for cores sharing a LLC (ms)"
 	range 1 3000
-	depends on GPFS
+	depends on GVFS
 	default 90
 
-config GPFS_INTERVAL_NUMA
+config GVFS_INTERVAL_NUMA
 	int "Target interval for cores in different nodes (ms)"
 	range 1 3000
-	depends on GPFS
+	depends on GVFS
 	default 150
 	help
 	  1000 indicates 1s target interval for local nodes,
 	  and 2s target interval for remote nodes.
 	  interval = value / 10 * numa_distance
 
-config GPFS_TOLERANCE_PERCENT
+config GVFS_TOLERANCE_PERCENT
 	int "Tolerance value as a percentage of target interval."
 	range 0 100
-	depends on GPFS
+	depends on GVFS
 	default 30
 
-config GPFS_RESCHED_TASK_AT_TARGET
+config GVFS_RESCHED_TASK_AT_TARGET
 	bool "Resched tasks which reach at the currect target"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		If you say Y, at task_tick_fair(), call resched_curr() 
 		if curr->se.vruntime > cfs_rq->target_vruntime.
 		If you say N, call resched_curr()
 		if cfs_rq->real_min_vruntime > cfs_rq->target_vruntime.
 
-config GPFS_SRC_ACTIVATED_BALANCING
+config GVFS_SRC_ACTIVATED_BALANCING
 	bool "[likely to die] Source activated balancing"
 	default n
-	depends on GPFS
+	depends on GVFS
 	help
 		Don't use this yet! The machine will die!
 		When difference between cfs_rq->target_vruntime and rq->sd_vruntime->target
-		is larger than CONFIG_GPFS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
+		is larger than CONFIG_GVFS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
 		the source cpu activated the target vruntime balancing.
 
-config GPFS_TARGET_DIFF_THRESHOLD
+config GVFS_TARGET_DIFF_THRESHOLD
 	int "Target difference threshold for source activated balancing"
 	range 2 100
 	default 3
-	depends on GPFS && GPFS_SRC_ACTIVATED_BALANCING
+	depends on GVFS && GVFS_SRC_ACTIVATED_BALANCING
 	help
 		Target difference threshold for source activated balancing
 
-config GPFS_INFEASIBLE_WEIGHT
+config GVFS_INFEASIBLE_WEIGHT
 	bool "Detect infeasible weight and heal it"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		Detect infeasible weight if
-		  1. target diff >= GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+		  1. target diff >= GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 		  2. nr_running = 1
 		  3. lagged_weight > others' lagged_weight
 		  Then, delete_min_target and do not update min_target for the task
 
 		The infeasibility of a CPU will be cleared 
 			1. when the CPU becomes idle.
-			2. when target diff < GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+			2. when target diff < GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 
 
-config GPFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+config GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 	int "Target difference threshold for detecting infeasible weight"
 	range 2 100
 	default 10
-	depends on GPFS && GPFS_SRC_ACTIVATED_BALANCING && GPFS_INFEASIBLE_WEIGHT
+	depends on GVFS && GVFS_SRC_ACTIVATED_BALANCING && GVFS_INFEASIBLE_WEIGHT
 	help
 		Target difference threshold for detecting infeasible weight
 
 
-config GPFS_RB_LEFTMOST_FIRST
+config GVFS_RB_LEFTMOST_FIRST
 	bool "Consider rb_leftmost task first while active balancing"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		While active load balancing, considering rb_leftmost tasks first may be benefitial,
 		since it is likely to have large lagged value.
@@ -997,43 +997,43 @@ config GPFS_RB_LEFTMOST_FIRST
 config PRINT_SCHED_DOMAIN_AT_SCHED_DEBUG
 	bool "Print detailed informaion of sched_domain at sched_debug"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		When cat /proc/sched_debug, the detailed structual information
 		(including pointer addresses) is shown.
 		This is for debug.
 
-config GPFS_BALANCING_IGNORE_LOCAL_GROUP
+config GVFS_BALANCING_IGNORE_LOCAL_GROUP
 	bool "Target vruntime balancing ignore local group, not just local cpu"
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
-		Basically, GPFS ignore only local cpu when balancing.
+		Basically, GVFS ignore only local cpu when balancing.
 		However, all cpus in a local group were considered at lower domain.
 		Thus, ignoring whole cpus in a local group is good idea.
 		But, not tested yet.
 
-config GPFS_DISABLE_ORIGINAL_BALANCING
+config GVFS_DISABLE_ORIGINAL_BALANCING
 	bool 'Disable the original load balancing'
 	default n
-	depends on GPFS
+	depends on GVFS
 	help
 		Disable the original version of load balancing.
 		Currently, only idle_balance() is disabled.
 
-config GPFS_CONSIDER_UTIL
+config GVFS_CONSIDER_UTIL
 	bool 'Consider cpu utilization of each task for lagged'
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		When calculating lagged, consider se->avg.util_avg value.
 		1. eff_weight_real = eff_load.weight(w/o normalization) * util_avg >> 10
 		2. use eff_weight_real instead of eff_load.weight to calculat lagged.
 
-config GPFS_LAGGED_WEIGHT_ADDED_BITS
+config GVFS_LAGGED_WEIGHT_ADDED_BITS
 	int 'The number of added bits to improve the accuracy of lagged_weight'
 	range 0 10
-	depends on (GPFS_CONSIDER_UTIL || GPFS_AMP)
+	depends on (GVFS_CONSIDER_UTIL || GVFS_AMP)
 	default 4
 	help
 		If this value is 0, the accuracy of lagged_weight is 10.
@@ -1042,18 +1042,18 @@ config GPFS_LAGGED_WEIGHT_ADDED_BITS
 		For amp,
 		  eff_weight_real = eff_weight_real * util_avg << (ADDED_BITS) / efficiency[type]
 
-config GPFS_REAL_MIN_VRUNTIME
+config GVFS_REAL_MIN_VRUNTIME
 	bool 'Use real min_vruntime instead of cfs_rq->min_vruntime'
 	default y
-	depends on GPFS
+	depends on GVFS
 	help
 		cfs_rq->min_vruntime don't go backward.
 		Use real min_vruntime when check the target.
 
-config GPFS_LARGE_GROUP_SHARES
+config GVFS_LARGE_GROUP_SHARES
 	bool 'Multiply shares of groups by number of possible cpus'
 	default n
-	depends on GPFS
+	depends on GVFS
 	help
 		When set shares of groups, multiply the value by number of possible cpus.
 		This prevents the frequent target value updates.

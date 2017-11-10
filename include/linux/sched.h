@@ -5,16 +5,16 @@
 
 #include <linux/sched/prio.h>
 
-#ifdef CONFIG_GPFS_AMP
-#define NUM_CPU_TYPES CONFIG_GPFS_NUM_CPU_TYPES
-#if CONFIG_GPFS_BASE_CPU_TYPE >= CONFIG_GPFS_NUM_CPU_TYPES
-ERROR "CONFIG_GPFS_BASE_CPU_TYPE should be smaller than CONFIG_GPFS_NUM_CPU_TYPES"
+#ifdef CONFIG_GVFS_AMP
+#define NUM_CPU_TYPES CONFIG_GVFS_NUM_CPU_TYPES
+#if CONFIG_GVFS_BASE_CPU_TYPE >= CONFIG_GVFS_NUM_CPU_TYPES
+ERROR "CONFIG_GVFS_BASE_CPU_TYPE should be smaller than CONFIG_GVFS_NUM_CPU_TYPES"
 #endif
-#else /* !CONFIG_GPFS_AMP */
-#define NUM_CPU_TYPES 2 /* default value for 'gpfs' binary */
+#else /* !CONFIG_GVFS_AMP */
+#define NUM_CPU_TYPES 2 /* default value */
 #endif
 
-#ifdef CONFIG_GPFS_STATS
+#ifdef CONFIG_GVFS_STATS
 #define NUM_MAX_TARGET_DIFF 10
 #endif
 
@@ -1054,11 +1054,11 @@ struct sched_domain {
 	struct sched_domain *parent;	/* top domain must be null terminated */
 	struct sched_domain *child;	/* bottom domain must be null terminated */
 	struct sched_group *groups;	/* the balancing groups of the domain */
-#ifdef CONFIG_GPFS
-	struct sd_vruntime *vruntime; /* the balancing criteria of GPFS */
+#ifdef CONFIG_GVFS
+	struct sd_vruntime *vruntime; /* the balancing criteria of GVFS */
 	u64 vruntime_interval;
 	u64 vruntime_tolerance;
-#endif /* CONFIG_GPFS */
+#endif /* CONFIG_GVFS */
 	unsigned long min_interval;	/* Minimum balance interval ms */
 	unsigned long max_interval;	/* Maximum balance interval ms */
 	unsigned int busy_factor;	/* less balancing by factor if busy */
@@ -1085,7 +1085,7 @@ struct sched_domain {
 	unsigned long next_decay_max_lb_cost;
 
 #ifdef CONFIG_SCHEDSTATS
-#ifdef CONFIG_GPFS_STATS
+#ifdef CONFIG_GVFS_STATS
 	/* _target_vruntime_balance() */
 	unsigned int target_update_racing;
 	/* __target_vruntime_balance() */
@@ -1128,7 +1128,7 @@ struct sched_domain {
 	unsigned int atb_pushed;
 	unsigned int atb_pushed_under;
 	unsigned int target_diff[NUM_MAX_TARGET_DIFF];
-#endif /* CONFIG_GPFS_STATS */
+#endif /* CONFIG_GVFS_STATS */
 
 	/* load_balance() stats */
 	unsigned int lb_count[CPU_MAX_IDLE_TYPES];
@@ -1202,7 +1202,7 @@ struct sd_data {
 	struct sched_domain **__percpu sd;
 	struct sched_group **__percpu sg;
 	struct sched_group_capacity **__percpu sgc;
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	struct sd_vruntime **__percpu sdv;
 #endif
 };
@@ -1284,7 +1284,7 @@ struct sched_avg {
 	unsigned long load_avg, util_avg;
 };
 
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 struct remember_info;
 #endif
 
@@ -1334,21 +1334,21 @@ struct sched_entity {
 	u64			sum_exec_runtime;
 	u64			prev_sum_exec_runtime;
 	u64			vruntime;
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 	u64			sum_perf_runtime;
 	u32			vruntime_rem;
 	u32			perf_rem;
 	u64			sum_type_runtime[NUM_CPU_TYPES];
-#endif /* CONFIG_GPFS_AMP */
-#ifdef CONFIG_GPFS
+#endif /* CONFIG_GVFS_AMP */
+#ifdef CONFIG_GVFS
 	u64			sleep_start; /* remember the sleep start time
 								to prevent vruntime normalization for short sleep */
-#ifdef CONFIG_GPFS_NORMAL_V2
+#ifdef CONFIG_GVFS_NORMAL_V2
 	u64			sleep_target; /* remember the target when start to sleep
 	                             for vruntime normalization */
-#endif /* CONFIG_GPFS_NORMAL_V2 */
-#endif /* CONFIG_GPFS_AMP */
-#ifdef CONFIG_GPFS_DEBUG_NORMALIZATION /* for debug */
+#endif /* CONFIG_GVFS_NORMAL_V2 */
+#endif /* CONFIG_GVFS_AMP */
+#ifdef CONFIG_GVFS_DEBUG_NORMALIZATION /* for debug */
 	unsigned int num_normalization;
 	u64 added_normalization;
 	u64 max_added_normalization;
@@ -1367,7 +1367,7 @@ struct sched_entity {
 	struct cfs_rq		*cfs_rq;
 	/* rq "owned" by this entity/group: */
 	struct cfs_rq		*my_q;
-#ifdef CONFIG_GPFS_BANDWIDTH
+#ifdef CONFIG_GVFS_BANDWIDTH
 	struct list_head	*state_q; /* refer to active_q or throt_q.
 									NULL while running */
 	struct list_head	state_node; /* node inserted to active_q or throt_q */ 
@@ -1383,7 +1383,7 @@ struct sched_entity {
 	 */
 	struct sched_avg	avg ____cacheline_aligned_in_smp;
 #endif
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	struct load_weight eff_load;	/* for vruntime update */
 	struct sched_entity *curr_child; /* for update effective_load */
 	unsigned long eff_weight_real; /* NOT affected by MIN_SHARES and MAX_SHARES */
@@ -1392,14 +1392,14 @@ struct sched_entity {
 									or 
 									eff_weight_real * util_avg << ADDED_BITS / efficiency[rq->cpu_type]
 									*/
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 	unsigned long *effi; /* a pointer to task->effi related to this se */
 	unsigned long __lagged_weight[NUM_CPU_TYPES]; /* lagged_weight for each type */
 #endif
 	s64 lagged; /* necessary time to reach se->vruntime to lagged_target */
 	u64 lagged_target; /* target used when calculating @lagged. */
 	unsigned long tg_load_sum_contrib;
-#endif /* CONFIG_GPFS */
+#endif /* CONFIG_GVFS */
 };
 
 struct sched_rt_entity {
@@ -1519,7 +1519,7 @@ struct task_struct {
 	int wake_cpu;
 #endif
 	int on_rq;
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 	int effi_mode;
 	unsigned long __effi[NUM_CPU_TYPES]; /* set by users or estimations */
 	unsigned long effi[NUM_CPU_TYPES]; /* normalized value of __efficiency */
@@ -1613,7 +1613,7 @@ struct task_struct {
 
 	pid_t pid;
 	pid_t tgid;
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	struct remember_info *remember;
 #endif
 

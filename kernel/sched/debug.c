@@ -397,7 +397,7 @@ static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group
 	P(se->avg.load_avg);
 	P(se->avg.util_avg);
 #endif
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	P(se->eff_load.weight);
 	P(se->eff_weight_real);
 #endif
@@ -431,13 +431,13 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 		SPLIT_NS(p->se.vruntime),
 		(long long)(p->nvcsw + p->nivcsw),
 		p->prio);
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	SEQ_printf(m, " %6ld %10ld %8ld",
 		p->se.load.weight, p->se.eff_weight_real, p->se.avg.util_avg
 		);
 	SEQ_printf(m, " %10ld %9Ld.%06ld",
 		p->se.lagged_weight, SPLIT_NS(p->se.lagged / NICE_0_LOAD));
-#endif /* CONFIG_GPFS */
+#endif /* CONFIG_GVFS */
 #ifdef CONFIG_SCHEDSTATS
 	if (schedstat_enabled()) {
 		SEQ_printf(m, " %9Ld.%06ld %9Ld.%06ld %9Ld.%06ld",
@@ -473,7 +473,7 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 	SEQ_printf(m,
 	"\nrunnable tasks:\n"
 	"            task   PID         tree-key  switches  prio"
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	" weight eff_weight load_avg"
 	" lag_weight lagged          "
 #endif
@@ -486,7 +486,7 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 #endif
 	"\n"
 	"-------------------------------------------------------"
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	"---------------------------"
 	"-----------------"
 #endif
@@ -516,7 +516,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 	struct rq *rq = cpu_rq(cpu);
 	struct sched_entity *last;
 	unsigned long flags;
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	u64 real_min_vruntime = -1;
 	u64 target_vruntime = -1, vruntime_interval = -1, vruntime_tolerance = -1;
 	struct sd_vruntime *sdv;
@@ -546,12 +546,12 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			SPLIT_NS(min_vruntime));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "max_vruntime",
 			SPLIT_NS(max_vruntime));
-#ifdef CONFIG_GPFS_REAL_MIN_VRUNTIME
+#ifdef CONFIG_GVFS_REAL_MIN_VRUNTIME
 	real_min_vruntime = cfs_rq->real_min_vruntime;
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "real_min_vruntime",
 			SPLIT_NS(real_min_vruntime));
 #endif
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	target_vruntime = cfs_rq->target_vruntime;
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "target_vruntime",
 			SPLIT_NS(target_vruntime));
@@ -593,7 +593,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 	SEQ_printf(m, "  .%-30s: %ld\n", "tg_load_avg",
 			atomic_long_read(&cfs_rq->tg->load_avg));
 #endif
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	SEQ_printf(m, "  .%-30s: %ld\n", "tg_load_sum",
 			atomic_long_read(&cfs_rq->tg->load_sum));
 #ifdef CONFIG_FAIR_GROUP_SCHED	
@@ -606,7 +606,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 #ifdef CONFIG_FAIR_GROUP_SCHED	
 	}	
 #endif
-#endif /* CONFIG_GPFS */
+#endif /* CONFIG_GVFS */
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_CFS_BANDWIDTH
 	SEQ_printf(m, "  .%-30s: %d\n", "throttled",
@@ -1030,7 +1030,7 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 	P(se.avg.util_avg);
 	P(se.avg.last_update_time);
 #endif
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 	P(se.tg_load_sum_contrib);
 	P(se.eff_load.weight);
 #endif
@@ -1061,7 +1061,7 @@ void proc_sched_set_task(struct task_struct *p)
 #endif
 }
 
-#ifdef CONFIG_GPFS
+#ifdef CONFIG_GVFS
 #define pr_emerg(fmt, ...) \
 	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
 
@@ -1101,12 +1101,12 @@ static void dump_task(struct task_struct *p) {
 
 static void dump_rq(struct rq *rq) {
 	pr_emerg("%-3d"
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 			" %4d"
 #endif
 			" %6d %6ld %8d %20s %16lld %16lld %16lld %16lld %16lld %16lld %16lld %10ld\n",
 				cpu_of(rq),
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 				rq->cpu_type,
 #endif
 				rq->nr_running,
@@ -1134,12 +1134,12 @@ void dump_sched(void) {
 	/* header for dump_rq() */
 	pr_emerg("DUMP_RQ\n");
 	pr_emerg("%-3s"
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 			" %4s"
 #endif
 			" %6s %6s %8s %20s %16s %16s %16s %16s %16s %16s %16s %10s\n",
 				"cpu",
-#ifdef CONFIG_GPFS_AMP
+#ifdef CONFIG_GVFS_AMP
 				"type",
 #endif
 				"nr_run",
