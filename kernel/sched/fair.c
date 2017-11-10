@@ -649,7 +649,7 @@ static inline void update_lagged_dequeue(struct sched_entity *se, struct cfs_rq 
 	se->lagged_target = 0;
 }
 
-#ifdef CONFIG_GVFS_MIN_TARGET
+#ifdef CONFIG_GVFS
 static u64 __get_min_target_traverse(struct rq *this_rq) {
 	u64 target, min_target = ULLONG_MAX;
 	int running = 0, cpu;
@@ -833,7 +833,7 @@ static void delete_min_target_rq(struct cfs_rq *cfs_rq) {
 			return;
 	}
 }
-#endif /* CONFIG_GVFS_MIN_TARGET */
+#endif /* CONFIG_GVFS */
 
 #define is_lagged_overflowed(lagged, add) (((add) < 0) || ((lagged) > 0 && ((lagged) + (add)) < 0))
 /* corner case. to prevent overflow. */
@@ -863,9 +863,7 @@ void __update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target) {
 	cfs_rq->lagged = lagged;
 	/* must update target here, since the target was modified. */
 	cfs_rq->target_vruntime = target;
-#ifdef CONFIG_GVFS_MIN_TARGET
 	update_min_target_rq(cfs_rq, target);
-#endif
 }
 
 static inline
@@ -887,9 +885,7 @@ void update_target_vruntime_cache(struct cfs_rq *cfs_rq, u64 target, int locked)
 	}
 	
 	cfs_rq->target_vruntime = target;
-#ifdef CONFIG_GVFS_MIN_TARGET
 	update_min_target_rq(cfs_rq, target);
-#endif
 }
 #endif /* CONFIG_GVFS */
 
@@ -3713,7 +3709,6 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 #ifdef CONFIG_GVFS
-#ifdef CONFIG_GVFS_NORMAL_V2
 static void
 __gvfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttled) {
 	struct cfs_rq *cfs_rq;
@@ -3739,20 +3734,6 @@ __gvfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttl
 
 	cfs_rq = &rq->cfs;
 	interval = cfs_rq->target_interval;
-
-#if 0
-	if (!throttled && se->sleep_start) {
-		/* ignore the short sleep */
-		target = rq_clock(rq);
-		vruntime = se->sleep_start;
-
-		if (unlikely(vruntime > target))
-			goto out;
-
-		if (target - vruntime <= interval) /* shorter than one interval */
-			goto out;
-	}
-#endif
 
 	target = cfs_rq->target_vruntime;
 	vruntime = se->vruntime;
@@ -3795,8 +3776,6 @@ __gvfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttl
 	if (vruntime_passed(se->vruntime, vruntime))
 		goto out;
 
-	/*printk(KERN_ERR "pid: %d comm: %s vruntime: %lld -> %lld sleep_start: %lld sleep_target: %lld min_target: %lld\n",
-			task_of(se)->pid, task_of(se)->comm, se->vruntime, vruntime, se->sleep_start, se->sleep_target, target); */
 #ifdef CONFIG_GVFS_DEBUG_NORMALIZATION
 	se->num_normalization++;
 	se->added_normalization += vruntime - se->vruntime;
@@ -3809,91 +3788,6 @@ out:
 	se->sleep_start = 0;
 	se->sleep_target = 0;
 }
-#else /* !CONFIG_GVFS_NORMAL_V2 */
-/* @throttled: 1 if called from gvfs_enqueue_throttled() */
-static void
-__gvfs_enqueue_normalization(struct rq *rq, struct sched_entity *se, int throttled) {
-	struct cfs_rq *cfs_rq;
-	u64 target;
-	u64 interval;
-	u64 vruntime;
-
-	if (!entity_is_task(se)) {
-		update_min_vruntime(se->my_q);
-		se->vruntime = se->my_q->min_vruntime;
-		se->sleep_start = 0;
-		return;
-	}
-
-	cfs_rq = &rq->cfs;
-	interval = cfs_rq->target_interval;
-
-	if (!throttled && se->sleep_start) {
-		/* ignore the short sleep */
-		target = rq_clock(rq);
-		vruntime = se->sleep_start;
-
-		if (vruntime >= target)
-			goto out;
-
-		if (target - vruntime <= interval) /* shorter than one interval */
-			goto out;
-	}
-
-	vruntime = se->vruntime;
-
-#ifdef CONFIG_GVFS_MIN_TARGET
-	if (!throttled && vruntime_passed(vruntime, cfs_rq->min_vruntime))
-		goto out;
-#endif /* CONFIG_GVFS_MIN_TARGET */
-	
-	target = cfs_rq->target_vruntime;
-	if (vruntime_passed(vruntime, target))
-		goto out;
-	
-	if (unlikely(target < interval)) /* maybe while initialization */
-		goto out;
-
-	if (vruntime_passed(vruntime, target - interval))
-		goto out;
-
-#ifdef CONFIG_GVFS_MIN_TARGET
-	rcu_read_lock();
-	target = get_min_target(rq);
-	rcu_read_unlock();
-
-	if (unlikely(target < interval)) /* maybe while initialization */
-		goto out;
-
-	if (vruntime_passed(vruntime, target - interval))
-		goto out;
-
-	/* hard to explain.... but, I want (target - interval) + (vruntime % interval) / 2 */
-	if (throttled)
-		vruntime = (target - interval) + ((vruntime % interval));
-	else
-		vruntime = (target - interval) + ((vruntime % interval) >> 1);
-#else /* !CONFIG_GVFS_MIN_TARGET */
-	/* hard to explain.... but, I want (target - interval) + (vruntime % interval) / 2 */
-	vruntime = (target - interval) + (vruntime % interval);
-	if (vruntime_passed(vruntime, cfs_rq->min_vruntime))
-		vruntime = cfs_rq->min_vruntime;
-#endif /* !CONFIG_GVFS_MIN_TARGET */
-
-	if (vruntime_passed(se->vruntime, vruntime))
-		goto out;	
-
-#ifdef CONFIG_GVFS_DEBUG_NORMALIZATION
-	se->num_normalization++;
-	se->added_normalization += vruntime - se->vruntime;
-	if ((vruntime - se->vruntime) > se->max_added_normalization)
-		se->max_added_normalization = vruntime - se->vruntime;
-#endif
-	se->vruntime = vruntime; 
-out:
-	se->sleep_start = 0;
-}
-#endif /* !CONFIG_GVFS_NORMAL_V2 */
 
 /* call only when wake up or waking up a task */
 static void
@@ -3905,9 +3799,7 @@ static void
 gvfs_dequeue_sleeper(struct rq *rq, struct sched_entity *se) {
 	if (!se->sleep_start) {
 		se->sleep_start = rq_clock(rq);
-#ifdef CONFIG_GVFS_NORMAL_V2
 		se->sleep_target = rq->cfs.target_vruntime;
-#endif
 	}
 }
 
@@ -4123,9 +4015,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (se->state_q == cfs_rq->thrott_q && entity_is_task(se)
 			&& (se->sleep_start == 0 || cfs_rq->throttled_clock < se->sleep_start)) {
 		se->sleep_start = cfs_rq->throttled_clock;
-#ifdef CONFIG_GVFS_NORMAL_V2
 		se->sleep_target = cfs_rq->throttled_target;
-#endif
 	}
 	list_del(&se->state_node);
 	se->state_q = NULL;
@@ -4213,9 +4103,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (se->state_q == cfs_rq->thrott_q) {
 		if (entity_is_task(se) && !se->sleep_start) {
 			se->sleep_start = cfs_rq->throttled_clock;
-#ifdef CONFIG_GVFS_NORMAL_V2
 			se->sleep_target = cfs_rq->throttled_target;
-#endif
 		}
 		//gvfs_enqueue_sleeper(rq_of(cfs_rq), se);
 		gvfs_enqueue_throttled(rq_of(cfs_rq), se);
@@ -4602,9 +4490,7 @@ static void gvfs_throttle_cfs_rq(struct cfs_rq *cfs_rq)
 			if (entity_is_task(se) && 
 					(se->sleep_start == 0 || cfs_rq->throttled_clock < se->sleep_start)) {
 				se->sleep_start = cfs_rq->throttled_clock;
-#ifdef CONFIG_GVFS_NORMAL_V2
 				se->sleep_target = cfs_rq->throttled_target;
-#endif
 			}
 			/* move to active_q */
 			list_move(&se->state_node, cfs_rq->active_q);
@@ -4658,7 +4544,7 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 
 	cfs_rq->throttled = 1;
 	cfs_rq->throttled_clock = rq_clock(rq);
-#ifdef CONFIG_GVFS_NORMAL_V2
+#ifdef CONFIG_GVFS_BANDWIDTH
 	cfs_rq->throttled_target = __cfs_rq_target_vruntime(cfs_rq);
 #endif
 	raw_spin_lock(&cfs_b->lock);
@@ -7190,7 +7076,7 @@ struct lb_env {
 	u64 tolerance;
 	s64 lagged_diff;
 #endif
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 	int slower_src; /* src_rq->cpu_type < dst_rq->cpu_type */
 #endif
 
@@ -9010,7 +8896,6 @@ out:
 #endif /* !CONFIG_GVFS_DISABLE_ORIGINAL_BALANCING */
 
 #ifdef CONFIG_GVFS
-#ifdef CONFIG_GVFS_MIN_TARGET
 void set_min_vruntime_idle_to_busy(struct rq *rq)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
@@ -9020,130 +8905,6 @@ void set_min_vruntime_idle_to_busy(struct rq *rq)
 #endif
 	return;
 }
-#else /* !CONFIG_GVFS_MIN_TARGET */
-/* rcu_read_lock must be held */
-/* Note that @sd is the lowest busy domain, or the highest domain */ 
-void set_min_vruntime_idle_to_busy(struct rq *rq)
-{
-	int this_cpu = rq->cpu;
-	struct sd_vruntime *highest_sdv = NULL;
-	struct sd_vruntime *sdv_lowest_busy = NULL;
-	struct sd_vruntime *sdv, *curr, *largest_curr;
-	struct cfs_rq *cfs_rq = &rq->cfs;
-	int updated_by;
-	u64 min_vruntime, idle_vruntime, busy_vruntime = (u64)(-(1LL << 20));
-	u64 curr_target, largest_target;
-	u64 now = rq_clock(rq);
-	s64 delta;
-	int all_domains_are_idle = 0; /* for debug message */
-
-	if (unlikely(rq->sd_vruntime == NULL)) /* while initialization */
-		return;
-
-	/* for very short sleep, do not update min_vruntime. */
-	/* This is also useful for initialization. */
-	delta = now - cfs_rq->idle_start;
-	
-	if (delta < (rq->cfs.target_interval / 2))
-		return;
-
-	for (sdv = rq->sd_vruntime; sdv; sdv = sdv->parent) {
-		highest_sdv = sdv;
-		if (!sdv_lowest_busy
-				&& atomic_read(&sdv->nr_busy) > 0)
-			sdv_lowest_busy = sdv;
-	}
-	
-	if (!sdv_lowest_busy)
-		sdv_lowest_busy = highest_sdv;
-	
-	/* initialization phase was filtered by rq->sd_vruntime == NULL above. */
-	BUG_ON(!highest_sdv); 
-	
-retry:
-	min_vruntime = cfs_rq->min_vruntime;
-	sdv = sdv_lowest_busy;
-
-	/* get idle_vruntime */
-	idle_vruntime = (u64) atomic64_read(&highest_sdv->largest_idle_min_vruntime);
-
-	/* if all domains are idle */
-	if (atomic_read(&highest_sdv->nr_busy) == 0) {
-		all_domains_are_idle = 1;
-		goto out;
-	}
-
-	/* get busy_vruntime */
-	updated_by = -1; /* sdv_lowest_busy->child == NULL */
-	while (sdv->child) {
-		updated_by = atomic_read(&sdv->updated_by);
-		if (updated_by < 0)
-			updated_by = this_cpu;
-		
-		curr = sdv->child;
-		curr_target = atomic64_read(&curr->target);
-		largest_curr = NULL;
-		largest_target = (u64)(-(1LL << 20));
-		do {
-			if (!atomic_read(&curr->nr_busy))
-				goto next;
-			
-			if (vruntime_passed_ne(curr_target, largest_target)) {
-				largest_curr = curr;
-				largest_target = curr_target;
-			} else if (curr_target == largest_target
-						&& cpumask_test_cpu(updated_by, sd_vruntime_span(curr))) {
-				largest_curr = curr;
-			}
-next:
-			curr = curr->next;
-		} while (curr != sdv->child);
-
-		if (!largest_curr) {
-			/* racing occurred! The domain is actually idle */
-			/* Go to the top level and retry */
-			sdv_lowest_busy = highest_sdv;
-			goto retry;
-		}
-		sdv = largest_curr;
-	}
-
-	if (updated_by < 0) /* sd_lowest_busy->vruntime->child == NULL */
-		updated_by = atomic_read(&sdv->updated_by);
-	else if (updated_by == this_cpu)
-		updated_by = -1;
-
-	/* sdv have the highest target among sibling domains.
-	 * Thus, min_vruntime of @updated_by is an appropriate candiate,
-	 * and the maxminum min_vruntime of all cpus in its span is also a candidate.
-	 */
-	if (updated_by >= 0 && cpu_rq(updated_by)->cfs.lagged < 0) {
-		busy_vruntime = atomic64_read(&sdv->target);
-	} else {
-		busy_vruntime = atomic64_read(&sdv->target) - (sdv->interval / 2);
-	}
-
-out:
-#ifdef CONFIG_GVFS_VERBOSE
-	if (vruntime_passed_ne(cfs_rq->min_vruntime, max_vruntime(idle_vruntime, busy_vruntime)))
-		gvfs_msg("[%s] min_vruntime_update_error_prone %s"
-				 " cpu: %d level: %d min_vruntime: %lld idle_vruntime: %lld busy_vruntime: %lld\n",
-				 __func__,
-				 all_domains_are_idle ? "all_domains_are_idle" : "some_domains_are_busy",
-				 this_cpu,
-				 sdv_lowest_busy ? sdv_lowest_busy->level : -1, 
-				 min_vruntime, idle_vruntime, busy_vruntime);
-#endif
-
-	min_vruntime = max_vruntime(min_vruntime, idle_vruntime);
-	min_vruntime = max_vruntime(min_vruntime, busy_vruntime);
-	cfs_rq->min_vruntime = min_vruntime;
-#ifndef CONFIG_64BIT
-	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
-#endif
-	return;
-}
-#endif /* !CONFIG_GVFS_MIN_TARGET */
 	
 /* rq->lock is held */
 void transit_idle_to_busy(struct rq *rq) 
@@ -9235,9 +8996,7 @@ void transit_busy_to_idle(struct rq *rq) {
 		 */
 		atomic_dec(&sdv->nr_busy);
 	}
-#ifdef CONFIG_GVFS_MIN_TARGET
 	delete_min_target_rq(cfs_rq);
-#endif
 	rcu_read_unlock();
 
 #ifdef CONFIG_GVFS_INFEASIBLE_WEIGHT
@@ -9279,7 +9038,7 @@ find_most_lagged_child(struct lb_env *env) {
 		int num_busy;
 		unsigned int sum_nr_running;
 		struct rq *rq;
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 		int min_cpu_type = INT_MAX;
 #endif
 
@@ -9300,7 +9059,7 @@ find_most_lagged_child(struct lb_env *env) {
 			lagged_sum += lagged;
 			num_busy++;
 			sum_nr_running += rq->cfs.h_nr_running;
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 			if (rq->cpu_type < min_cpu_type)
 				min_cpu_type = rq->cpu_type;
 #endif
@@ -9312,14 +9071,14 @@ find_most_lagged_child(struct lb_env *env) {
 			continue;
 		}
 // TODO: include cpu_type < dst_rq->cpu_type => ignore sum_nr_running condition
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 		if (min_cpu_type >= env->dst_rq->cpu_type 
 				&& sum_nr_running < child->nr_cpus)
 			continue;
-#else /* !CONFIG_GVFS_AMP_AGGRESSIVE */
+#else /* !CONFIG_GVFS_AMP */
 		if (sum_nr_running < child->nr_cpus)
 			continue;
-#endif /* !CONFIG_GVFS_AMP_AGGRESSIVE */
+#endif /* !CONFIG_GVFS_AMP */
 
 #if CONFIG_GVFS_TOLERANCE_PERCENT > 0
 		/* Note that 1) tolerance = 0 for idle destination cpus
@@ -9373,17 +9132,17 @@ static struct rq *find_most_lagged_rq(struct lb_env *env,
 	for_each_cpu_and(cpu, sd_vruntime_span(sdv), env->cpus) {
 		gvfs_stat_inc(env->sd, lagged_count[env->idle]);
 		rq = cpu_rq(cpu);
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 		if (rq->cpu_type >= env->dst_rq->cpu_type && rq->nr_running < 2) {
 			gvfs_stat_inc(env->sd, lagged_little_tasks[env->idle]);
 			continue;
 		}
-#else /* !CONFIG_GVFS_AMP_AGGRESSIVE */
+#else /* !CONFIG_GVFS_AMP */
 		if (rq->nr_running < 2) {
 			gvfs_stat_inc(env->sd, lagged_little_tasks[env->idle]);
 			continue;
 		}
-#endif /* !CONFIG_GVFS_AMP_AGGRESSIVE */
+#endif /* !CONFIG_GVFS_AMP */
 
 		if (rq->cfs.h_nr_running == 0) {
 			gvfs_stat_inc(env->sd, lagged_no_cfs_tasks[env->idle]);
@@ -9629,7 +9388,7 @@ static int detach_lagged_tasks(struct lb_env *env)
 		/* TODO: we do not consider ASYM_PACKING */
 		
 		if (env->src_rq->nr_running <= 1 
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS
 				&& !env->slower_src
 #endif
 			) {
@@ -9883,7 +9642,6 @@ next:
 }
 #endif /* !CONFIG_GVFS_AMP - SMP version */
 
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 static int find_dst_cpu(int __sd_level, int src_cpu) {
 	struct sched_domain *sd;
 	int sd_level = -(__sd_level + 1);
@@ -9961,7 +9719,6 @@ static int find_dst_cpu(int __sd_level, int src_cpu) {
 
 	return dst_idle_cpu >= 0 ? dst_idle_cpu : dst_cpu;
 }
-#endif /* CONFIG_GVFS_SRC_ACTIVATED_BALANCING */
 
 /*
  * active_target_vruntime_balance_cpu_stop is run by cpu stopper. It pushes
@@ -9974,15 +9731,10 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 	struct rq *src_rq = data;
 	int src_cpu = cpu_of(src_rq);
 	int dst_cpu = src_rq->push_cpu;
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 	struct rq *dst_rq;
-#else
-	struct rq *dst_rq = cpu_rq(dst_cpu);
-#endif
 	struct sched_domain *sd;
 	struct task_struct *p = NULL;
 
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 	if (dst_cpu >= 0)
 		dst_rq = cpu_rq(dst_cpu);
 	else { /* source activated balancing */
@@ -9991,7 +9743,7 @@ static int active_target_vruntime_balance_cpu_stop(void *data)
 			return 0;
 		dst_rq = cpu_rq(dst_cpu);
 	}
-#endif
+	
 	raw_spin_lock_irq(&src_rq->lock);
 
 	/* make sure the requested cpu hasn't gone down in the meantime */
@@ -10050,9 +9802,7 @@ out_unlock:
 	return 0;
 }
 
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 int cpu_stop_thread_on_cpu(unsigned int cpu);
-#endif
 
 static int __target_vruntime_balance(int this_cpu, struct rq *this_rq, 
 					struct sched_domain *sd, enum cpu_idle_type idle,
@@ -10120,13 +9870,13 @@ redo:
 
 	env.src_cpu = lagged_rq->cpu;
 	env.src_rq = lagged_rq;
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 	env.slower_src = env.src_rq->cpu_type < env.dst_rq->cpu_type;
 #endif
 
 	pulled_tasks = 0;
 	if (env.src_rq->nr_running > 1
-#ifdef CONFIG_GVFS_AMP_AGGRESSIVE
+#ifdef CONFIG_GVFS_AMP
 			|| env.slower_src
 #endif
 		) {
@@ -10214,15 +9964,12 @@ redo:
 		 * only after active load balance is finished.
 		 */
 		if (!env.src_rq->active_balance
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 			/* if source activated balancing is used,
 			 * there may be contention on stopper[cpu]->thread->on_cpu.
 			 * See kernel/sched/core.c:try_to_wake_up()=>smp_cond_acquire(!p->on_cpu)
 			 * It may cause large amount of loops 
 			 */
-				&& !cpu_stop_thread_on_cpu(env.src_cpu)
-#endif
-				) {
+				&& !cpu_stop_thread_on_cpu(env.src_cpu)) {
 			env.src_rq->active_balance = 1;
 			env.src_rq->push_cpu = this_cpu;
 			do_active_balance = 1;
@@ -10318,10 +10065,9 @@ static int _target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle_
 		target = atomic64_read(&sd_vruntime->target); /* refresh the target */
 		   
 		if (vruntime_passed(target, min_vruntime)) {
-#ifdef CONFIG_GVFS_MIN_TARGET
 			if (idle != CPU_NOT_IDLE)
 				update_min_target(sd_vruntime, target, 0);
-#endif /* CONFIG_GVFS_MIN_TARGET */
+
 			if (pulled_tasks > 0) {
 				gvfs_stat_inc(sd, tvb_stay[idle_init]);
 				break; /* stay in this round */
@@ -10339,20 +10085,6 @@ static int _target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle_
 		 * (even if cpu is idle, we have min_vruntime > my_target.
 		 * We should go to the next round.)
 		 */
-#if 0
-		while (my_target > target)
-			target += interval;
-		/* Between sd_vruntime->target and sd_vruntime->updated_by, racing is allowed */
-		old_target = atomic64_xchg(&sd_vruntime->target, target);
-		if (likely(target > old_target)) {
-			atomic_set(&sd_vruntime->updated_by, this_cpu); 
-			gvfs_stat_inc(sd, tvb_update_target[idle_init]);
-		} else while (unlikely(target < old_target)) {
-			gvfs_stat_inc(sd, target_update_racing);
-			target = old_target;
-			old_target = atomic64_xchg(&sd_vruntime->target, target);
-		}
-#endif
 again:
 		old_target = target;
 		while (my_target >= target)
@@ -10367,9 +10099,7 @@ again:
 			if (my_target >= target)
 				goto again;
 		}
-#ifdef CONFIG_GVFS_MIN_TARGET
 		update_min_target(sd_vruntime, atomic64_read(&sd_vruntime->target), 1);
-#endif /* CONFIG_GVFS_MIN_TARGET */
 	}
 
 	rcu_read_unlock();
@@ -10384,7 +10114,7 @@ again:
 	return pulled_tasks;
 }
 
-/* for GVFS_STATS, GVFS_SRC_ACTIVATED_BALANCING, GVFS_INFEASIBLE_WEIGHT */
+/* for GVFS_STATS, source activated balancing and detecting infeasible weight tasks */
 static u64 check_target_diff(struct rq *rq, struct sched_domain **large_diff_sd) {
 	int cpu = cpu_of(rq);
 	struct sched_domain *sd;
@@ -10408,13 +10138,11 @@ static u64 check_target_diff(struct rq *rq, struct sched_domain **large_diff_sd)
 
 		if (target > my_target) {
 			diff = (target - my_target) / interval;
-#if defined(CONFIG_GVFS_SRC_ACTIVATED_BALANCING) || defined(CONFIG_GVFS_INFEASIBLE_WEIGHT)
 			if (diff > CONFIG_GVFS_TARGET_DIFF_THRESHOLD) {
 				*large_diff_sd = sd;
 				if (diff > max_diff)
 					max_diff = diff;
 			}
-#endif /* CONFIG_GVFS_SRC_ACTIVATED_BALANCING || CONFIG_GVFS_INFEASIBLE_WEIGHT */
 		}
 #ifdef CONFIG_GVFS_STATS
 		else
@@ -10497,9 +10225,7 @@ static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
 	int pulled_tasks = 0;
 	struct sched_domain *large_diff_sd = NULL;
 	u64 max_diff;
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 	int do_active_balance = 0;
-#endif
 	struct cfs_rq *cfs_rq = &this_rq->cfs;
 	u64 target;
 	u64 min_vruntime = real_min_vruntime(cfs_rq);
@@ -10515,7 +10241,6 @@ static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
 #ifdef CONFIG_GVFS_INFEASIBLE_WEIGHT
 	check_infeasible_weight(this_rq, max_diff, large_diff_sd);
 #endif
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 	if (large_diff_sd && this_rq->nr_running > 1) {
 		gvfs_stat_inc(this_rq, satb_cond);
 		/* if cpu_stopper->thread->on_cpu == 1, 
@@ -10529,17 +10254,15 @@ static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
 			goto skip_fast_check;
 		}
 	} 
-#endif
 
 	if (idle == CPU_NOT_IDLE) {
 		/* Fast level-0 checking before release the lock. */
 		target = atomic64_read(&this_rq->sd_vruntime->target);
 		if (vruntime_passed(target, min_vruntime)) {
-#ifdef CONFIG_GVFS_MIN_TARGET
 			target = cfs_rq->target_vruntime;
 			while (vruntime_passed(min_vruntime, target))
 				target += cfs_rq->target_interval;
-#endif
+			
 			/* we are not the fastest one. Just update the target. */
 			update_target_vruntime_cache(cfs_rq, target, 1);
 			gvfs_stat_inc(this_rq, tvb_fast_path[idle]);
@@ -10547,9 +10270,7 @@ static int target_vruntime_balance(struct rq *this_rq, enum cpu_idle_type idle)
 		}
 	}
 
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 skip_fast_check:
-#endif
 #ifdef CONFIG_GVFS_DISABLE_ORIGINAL_BALANCING 
 	/*
 	 * We must set idle_stamp _before_ calling idle_balance(), such that we
@@ -10561,13 +10282,11 @@ skip_fast_check:
 
 	raw_spin_unlock(&this_rq->lock);
 
-#ifdef CONFIG_GVFS_SRC_ACTIVATED_BALANCING
 	if (do_active_balance) {
 		stop_one_cpu_nowait(cpu_of(this_rq),
 			active_target_vruntime_balance_cpu_stop, this_rq,
 			&this_rq->active_balance_work);
 	} else /* call _target_vruntime_balance */
-#endif
 		pulled_tasks = _target_vruntime_balance(this_rq, idle);
 			
 	raw_spin_lock(&this_rq->lock);
@@ -10576,18 +10295,12 @@ skip_fast_check:
 	 * Thus, we need to synchronize the values,
 	 * and we update it under rq->lock. 
 	 */
-#ifdef CONFIG_GVFS_MIN_TARGET
 	target = cfs_rq->target_vruntime;
 	min_vruntime = real_min_vruntime(cfs_rq);
 	while (vruntime_passed(min_vruntime, target))
 		target += cfs_rq->target_interval;
 	if (cfs_rq->target_vruntime < target)
 		update_target_vruntime_cache(cfs_rq, target, 1);
-#else
-	target = atomic64_read(&this_rq->sd_vruntime->target);
-	if (cfs_rq->target_vruntime < target)
-		update_target_vruntime_cache(cfs_rq, target, 1);
-#endif
 	
 	/*
 	 * While browsing the domains, we released the rq lock, a task could
@@ -10698,7 +10411,7 @@ static inline int on_null_domain(struct rq *rq)
  */
 static struct {
 	cpumask_var_t idle_cpus_mask;
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	cpumask_var_t idle_cpus_mask_type[NUM_CPU_TYPES];
 	atomic_t nr_cpus_acc[NUM_CPU_TYPES];
 #endif
@@ -10746,7 +10459,7 @@ static void nohz_balancer_kick(void)
 
 static inline void nohz_balance_exit_idle(int cpu)
 {
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	int type;
 #endif
 	if (unlikely(test_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu)))) {
@@ -10755,12 +10468,12 @@ static inline void nohz_balance_exit_idle(int cpu)
 		 */
 		if (likely(cpumask_test_cpu(cpu, nohz.idle_cpus_mask))) {
 			cpumask_clear_cpu(cpu, nohz.idle_cpus_mask);
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 		type = cpu_rq(cpu)->cpu_type;
 		cpumask_clear_cpu(cpu, nohz.idle_cpus_mask_type[type]);
 		for (; type >= 0; type--)
 			atomic_dec(&nohz.nr_cpus_acc[type]);
-#endif /* CONFIG_GVFS_AMP_NO_HZ */
+#endif /* CONFIG_GVFS_AMP */
 			atomic_dec(&nohz.nr_cpus);
 		}
 		clear_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
@@ -10807,7 +10520,7 @@ unlock:
  */
 void nohz_balance_enter_idle(int cpu)
 {
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	int type;
 #endif
 	/*
@@ -10826,12 +10539,12 @@ void nohz_balance_enter_idle(int cpu)
 		return;
 
 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	type = cpu_rq(cpu)->cpu_type;
 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask_type[type]);
 	for (; type >= 0; type--)
 		atomic_inc(&nohz.nr_cpus_acc[type]);
-#endif /* CONFIG_GVFS_AMP_NO_HZ */
+#endif /* CONFIG_GVFS_AMP */
 	atomic_inc(&nohz.nr_cpus);
 	set_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
 }
@@ -10986,7 +10699,7 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 	/* Earliest time when we have to do rebalance again */
 	unsigned long next_balance = jiffies + 60*HZ;
 	int update_next_balance = 0;
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	int type;
 #endif
 
@@ -10994,7 +10707,7 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 	    !test_bit(NOHZ_BALANCE_KICK, nohz_flags(this_cpu)))
 		goto end;
 
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	type = NUM_CPU_TYPES - 1;
 	balance_cpu = -1;
 	while (type >= 0) {
@@ -11039,7 +10752,7 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 			next_balance = rq->next_balance;
 			update_next_balance = 1;
 		}
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	} /* for vim...*/
 #else
 	}
@@ -11098,7 +10811,7 @@ static inline bool nohz_kick_needed(struct rq *rq)
 	if (rq->nr_running >= 2)
 		return true;
 
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	if (rq->cpu_type + 1 < NUM_CPU_TYPES
 			&& rq->cfs.h_nr_running >= 1 
 			&& atomic_read(&nohz.nr_cpus_acc[rq->cpu_type + 1]) > 0)
@@ -11235,7 +10948,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	if (static_branch_unlikely(&sched_numa_balancing))
 		task_tick_numa(rq, curr);
 
-#ifdef CONFIG_GVFS_RESCHED_TASK_AT_TARGET
+#ifdef CONFIG_GVFS
 	/* current task reach at the target. 
 	 * when rq->cfs.nr_running > 1 => schedule one of other tasks that do not reach the target. 
 	 *	                              If all tasks reach the target, call target_vruntime_balance().
@@ -11245,13 +10958,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		clear_buddies(task_cfs_rq(curr), &curr->se);
 		return;
 	}
-#else /* !CONFIG_GVFS_RESCHED_TASK_AT_TARGET */
-	if (unlikely(vruntime_passed(real_min_vruntime(&rq->cfs), rq->cfs.target_vruntime))) {
-		resched_curr(rq);
-		clear_buddies(task_cfs_rq(curr), &curr->se);
-		return;
-	}
-#endif /* !CONFIG_GVFS_RESCHED_TASK_AT_TARGET */
+#endif /* CONFIG_GVFS */
 }
 
 /*
@@ -11777,7 +11484,7 @@ void show_numa_stats(struct task_struct *p, struct seq_file *m)
 
 __init void init_sched_fair_class(void)
 {
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#if defined(CONFIG_GVFS_AMP) && defined(CONFIG_NO_HZ_COMMON)
 	int type;
 #endif
 #ifdef CONFIG_SMP
@@ -11786,7 +11493,7 @@ __init void init_sched_fair_class(void)
 #ifdef CONFIG_NO_HZ_COMMON
 	nohz.next_balance = jiffies;
 	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
-#ifdef CONFIG_GVFS_AMP_NO_HZ
+#ifdef CONFIG_GVFS_AMP
 	for_each_type(type) {
 		zalloc_cpumask_var(&nohz.idle_cpus_mask_type[type], GFP_NOWAIT);
 	}

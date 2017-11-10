@@ -1343,10 +1343,8 @@ struct sched_entity {
 #ifdef CONFIG_GVFS
 	u64			sleep_start; /* remember the sleep start time
 								to prevent vruntime normalization for short sleep */
-#ifdef CONFIG_GVFS_NORMAL_V2
 	u64			sleep_target; /* remember the target when start to sleep
 	                             for vruntime normalization */
-#endif /* CONFIG_GVFS_NORMAL_V2 */
 #endif /* CONFIG_GVFS_AMP */
 #ifdef CONFIG_GVFS_DEBUG_NORMALIZATION /* for debug */
 	unsigned int num_normalization;

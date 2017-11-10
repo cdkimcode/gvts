@@ -7194,10 +7194,8 @@ build_sd_vruntime(struct sched_domain *sd, int cpu)
 	sdv->parent = NULL;
 	sdv->next = sdv;
 	sdv->child = NULL;
-#ifdef CONFIG_GVFS_MIN_TARGET
 	atomic64_set(&sdv->min_target, sd->vruntime_interval);
 	atomic64_set(&sdv->min_child, (long) NULL);
-#endif
 	atomic64_set(&sdv->largest_idle_min_vruntime, 0);
 	atomic_set(&sdv->nr_busy, 0); /* nr_busy will be correctly set at cpu_attach_sdv() */
 	cpumask_copy(sd_vruntime_span(sdv), sched_domain_span(sd));

@@ -486,7 +486,7 @@ struct cfs_rq {
 
 	u64 throttled_clock, throttled_clock_task;
 	u64 throttled_clock_task_time;
-#ifdef CONFIG_GVFS_NORMAL_V2
+#ifdef CONFIG_GVFS_BANDWIDTH
 	u64 throttled_target;
 #endif
 	int throttled, throttle_count;
@@ -994,10 +994,9 @@ struct sd_vruntime {
 	struct sd_vruntime *next;
 	struct sd_vruntime *parent;
 	struct sd_vruntime *child;
-#if CONFIG_GVFS_MIN_TARGET
 	atomic64_t min_target;
 	atomic64_t min_child; /* struct rq for level-0, struct sd_vruntime otherwise. */
-#endif
+	
 	/* used only when busy-to-idle or idle-to-busy transition time */
 	atomic64_t largest_idle_min_vruntime;
 	atomic_t nr_busy; /* the number of busy cpus in this domain */

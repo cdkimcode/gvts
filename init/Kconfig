@@ -788,13 +788,21 @@ config BUILD_BIN2C
 	default n
 
 config GVFS
-	bool "Group-aware Performance Fair Scheduler by CDKIM"
+	bool "Global Virtual-time Fair Scheduler by CDKIM"
 	default y
 	help
-		Include GVFS_EFF_WEIGHT2 and GVFS_CONSIDER_LOAD
-		   * Effective weight for vruntime update with the real-time sum of load
-		   * Use real-time sum of load to calculate effective weight
-		   * Consider load of tasks during vruntime balancing
+		* Global Virtual-time Balancing: virtual-time based fair scheduling for multi-cores
+		When all threads in a CPU's runqueue reaches a target virtual time,
+		the CPU firstly scans threads in other CPUs which have not reached the target.
+		If such thread exists, the CPU pulls the thread.
+		Otherwise, the CPU increases the target and goes on.
+		
+		* Topology-aware hierarchical balancing for scalability
+		The 'interval' length, the amount of target increase for each interval, 
+		determines the accuracy of fairness and the frequency of thread migreation.
+		GVFS awares the topology and uses the long interval length for NUMA,
+		and the short interval length for SMT.
+		This mitigates the thread migration overhead and improves fairness accuracy.
 
 		* Effective weight	
 		For group-aware scheduling, for every tick, enqueue or dequeue,
@@ -807,36 +815,27 @@ config GVFS
 		Note that calc_tg_weight(tg) uses tg->load_sum instead of tg->load_avg.
 		tg->load_sum is the absolute and real-time value.
 		
-		* Consider load of tasks	
-		When doing target vruntime balancing, consider load.
-		Actually, load balancing tries to all cpus reach
+		* Consider the remaining time to reach the next target
+		When doing target vruntime balancing, consider the remaining time to reach the next target.
+		Actually, global virtual time balancing tries to all cpus reach
 		the next target as simultaneously as possible.
 
-config GVFS_MIN_TARGET
-	bool "Manage and apply the minimum target vruntime of level-0"
-	default y
-	help
-		struct sdvruntime keeps the minimum value of target vruntime
-		of child sdvruntimes.
-		The minimum value used for waking up tasks and waking up CPUs.
-
-config GVFS_NORMAL_V2
-    bool "Use 2nd version of vruntime normalization for slept or throttled tasks"
-	default y
-	depends on GVFS_MIN_TARGET
-	help
-	    The first version use a heuristic algorithm.
-		- Ignore short sleeps
-		- vruntime = min_target - (vruntime % interval) / 2
-		The second version use the utilization based algorithm
-		- vruntime += (increase of target from sleep) * (SCHED_LOAD_SCALE - util_avg) / SCHED_LOAD_SCALE
+		* New vruntime normalization for slept or throttled tasks
+		- Let global_min_target is the minimum level-0 target for all CPUs
+		- For interactive jobs (CPU util < 6.25%)
+		  vruntime = global_min_target - (interval / 2)
+		- For batch jobs (CPU_util > 96.875%)a
+		  vruntime = vruntime (no change)
+		- Otherwise,
+		  vruntime += (global_min_target - target_at_sleep) * CPU_util
 
 config GVFS_BANDWIDTH
-	bool "Support for bandwidth control in GVFS"
+	bool "Support for bandwidth control in GVFS (EXPERIMENTAL)"
 	default y
 	depends on GVFS && CFS_BANDWIDTH
 	help
 		Support for bandwidth control (CFS_BANDWIDTH) in GVFS
+		Currently, this does not work properly for some cases.
 
 config GVFS_AMP
 	bool "AMP support of GVFS"
@@ -847,20 +846,8 @@ config GVFS_AMP
 		efficiency (and efficiency modes) for tasks.
 		define cpu types for each rq.
 		minimize max(lagged_src, lagged_dst) at targer vruntime balancing.
-
-config GVFS_AMP_NO_HZ
-	bool "NOHZ support of GVFS AMP"
-	default y
-	depends on GVFS && GVFS_AMP && NO_HZ_COMMON
-	help
+		Try to balance even if only 1 task at source runqueue when source is slower than destination.
 		faster-core-first for NOHZ of GVFS_AMP
-
-config GVFS_AMP_AGGRESSIVE
-	bool "Aggressivle balancing for GVFS with AMP support"
-	default y
-	depends on GVFS_AMP
-	help
-		Try to balance even if only 1 task at source runqueue.
 
 config GVFS_DEBUG_NORMALIZATION
 	bool "Debug normalization of vruntime"
@@ -932,33 +919,17 @@ config GVFS_TOLERANCE_PERCENT
 	depends on GVFS
 	default 30
 
-config GVFS_RESCHED_TASK_AT_TARGET
-	bool "Resched tasks which reach at the currect target"
-	default y
-	depends on GVFS
-	help
-		If you say Y, at task_tick_fair(), call resched_curr() 
-		if curr->se.vruntime > cfs_rq->target_vruntime.
-		If you say N, call resched_curr()
-		if cfs_rq->real_min_vruntime > cfs_rq->target_vruntime.
-
-config GVFS_SRC_ACTIVATED_BALANCING
-	bool "[likely to die] Source activated balancing"
-	default n
-	depends on GVFS
-	help
-		Don't use this yet! The machine will die!
-		When difference between cfs_rq->target_vruntime and rq->sd_vruntime->target
-		is larger than CONFIG_GVFS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
-		the source cpu activated the target vruntime balancing.
 
 config GVFS_TARGET_DIFF_THRESHOLD
 	int "Target difference threshold for source activated balancing"
 	range 2 100
 	default 3
-	depends on GVFS && GVFS_SRC_ACTIVATED_BALANCING
+	depends on GVFS
 	help
-		Target difference threshold for source activated balancing
+		When difference between cfs_rq->target_vruntime and rq->sd_vruntime->target
+		is larger than CONFIG_GVFS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
+		the source cpu activated the target vruntime balancing.
+
 
 config GVFS_INFEASIBLE_WEIGHT
 	bool "Detect infeasible weight and heal it"
@@ -980,7 +951,7 @@ config GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 	int "Target difference threshold for detecting infeasible weight"
 	range 2 100
 	default 10
-	depends on GVFS && GVFS_SRC_ACTIVATED_BALANCING && GVFS_INFEASIBLE_WEIGHT
+	depends on GVFS && GVFS_INFEASIBLE_WEIGHT
 	help
 		Target difference threshold for detecting infeasible weight
 
