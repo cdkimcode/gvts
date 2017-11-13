@@ -41,8 +41,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		    rq->rq_cpu_time,
 		    rq->rq_sched_info.run_delay, rq->rq_sched_info.pcount);
 #ifdef CONFIG_GVFS_STATS
-		seq_printf(seq, " %u %u %u", 
-			rq->nr_idle_balance_works, 
+		seq_printf(seq, " %u %u", 
 			rq->nr_running, 
 			rq->cfs.h_nr_running
 			);
@@ -60,11 +59,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		}
 		seq_printf(seq, " %llu %llu",
 					rq->cfs.target_vruntime,
-#ifdef CONFIG_GVFS_REAL_MIN_VRUNTIME
 					rq->cfs.real_min_vruntime
-#else	
-					rq->cfs.min_vruntime
-#endif
 					);
 		seq_printf(seq, " %ld %lld %u %u %u %u %u %u %u %u %u\n",
 					rq->cfs.lagged_weight, rq->cfs.lagged,

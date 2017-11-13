@@ -546,7 +546,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			SPLIT_NS(min_vruntime));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "max_vruntime",
 			SPLIT_NS(max_vruntime));
-#ifdef CONFIG_GVFS_REAL_MIN_VRUNTIME
+#ifdef CONFIG_GVFS
 	real_min_vruntime = cfs_rq->real_min_vruntime;
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "real_min_vruntime",
 			SPLIT_NS(real_min_vruntime));

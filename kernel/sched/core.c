@@ -8582,11 +8582,7 @@ void __init sched_init(void)
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
 #ifdef CONFIG_FAIR_GROUP_SCHED
-#ifdef CONFIG_GVFS_LARGE_GROUP_SHARES
-		root_task_group.shares = ROOT_TASK_GROUP_LOAD * num_possible_cpus();
-#else
 		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
-#endif
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		/*
 		 * How much cpu bandwidth does root_task_group get?
@@ -8626,8 +8622,6 @@ void __init sched_init(void)
 		rq->rd = NULL;
 #ifdef CONFIG_GVFS
 		rq->sd_vruntime = NULL;
-#endif
-#ifdef CONFIG_GVFS_INFEASIBLE_WEIGHT
 		rq->infeasible_weight = 0;
 #endif
 		rq->cpu_capacity = rq->cpu_capacity_orig = SCHED_CAPACITY_SCALE;

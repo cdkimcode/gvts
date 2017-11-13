@@ -399,13 +399,11 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64 min_vruntime_copy;
 #endif
-#ifdef CONFIG_GVFS_REAL_MIN_VRUNTIME
+#ifdef CONFIG_GVFS
 	u64 real_min_vruntime; /* can go backward */
 #ifndef CONFIG_64BIT
 	u64 real_min_vruntime_copy;
 #endif
-#endif
-#ifdef CONFIG_GVFS
 	u64 target_vruntime; /* cache of rq->sd_vruntime->target */
 	u64 target_interval; /* cache of rq->sd_vruntime->interval */
 	enum cfs_rq_state {
@@ -697,8 +695,6 @@ struct rq {
 	struct sched_domain *sd;
 #ifdef CONFIG_GVFS
 	struct sd_vruntime *sd_vruntime;
-#endif
-#ifdef CONFIG_GVFS_INFEASIBLE_WEIGHT
 	int infeasible_weight;
 #endif
 
@@ -770,7 +766,6 @@ struct rq {
 
 #ifdef CONFIG_GVFS_STATS
 	unsigned int largest_idle_min_vruntime_racing;
-	unsigned int nr_idle_balance_works;
 	/* target_vruntime_balance() stats */
 	unsigned int tvb_count[CPU_MAX_IDLE_TYPES];
 	unsigned int tvb_fast_path[CPU_MAX_IDLE_TYPES];

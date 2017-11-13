@@ -819,6 +819,10 @@ config GVFS
 		When doing target vruntime balancing, consider the remaining time to reach the next target.
 		Actually, global virtual time balancing tries to all cpus reach
 		the next target as simultaneously as possible.
+		- When calculating lagged, consider se->avg.util_avg value.
+		  eff_weight_real = eff_load.weight(w/o normalization) * util_avg 
+		                         >> (SCHED_LOAD_SHIFT - CONFIG_GVFS_LAGGED_WEIGHT_ADDED_BITS)
+		  and use eff_weight_real instead of eff_load.weight to calculat lagged.
 
 		* New vruntime normalization for slept or throttled tasks
 		- Let global_min_target is the minimum level-0 target for all CPUs
@@ -829,6 +833,13 @@ config GVFS
 		- Otherwise,
 		  vruntime += (global_min_target - target_at_sleep) * CPU_util
 
+		Other optimizations
+		- While active load balancing, considering rb_leftmost tasks first may be benefitial,
+		  since it is likely to have large lagged value.
+		- Ignore the local group CPUs while target virtual time balancing
+		  since the local group CPUs was balanced at the lower level domain.
+
+
 config GVFS_BANDWIDTH
 	bool "Support for bandwidth control in GVFS (EXPERIMENTAL)"
 	default y
@@ -836,6 +847,13 @@ config GVFS_BANDWIDTH
 	help
 		Support for bandwidth control (CFS_BANDWIDTH) in GVFS
 		Currently, this does not work properly for some cases.
+
+config GVFS_DEBUG_NORMALIZATION
+	bool "Debug normalization of vruntime"
+	default n
+	depends on GVFS
+	help
+		Debug information for virtual time normalization when a task is waking up
 
 config GVFS_AMP
 	bool "AMP support of GVFS"
@@ -848,13 +866,6 @@ config GVFS_AMP
 		minimize max(lagged_src, lagged_dst) at targer vruntime balancing.
 		Try to balance even if only 1 task at source runqueue when source is slower than destination.
 		faster-core-first for NOHZ of GVFS_AMP
-
-config GVFS_DEBUG_NORMALIZATION
-	bool "Debug normalization of vruntime"
-	default n
-	depends on GVFS
-	help
-		Debug information for virtual time normalization when a task is waking up
 
 config GVFS_NUM_CPU_TYPES
 	int "Number of CPU types"
@@ -881,15 +892,6 @@ config GVFS_STATS
 	depends on GVFS && SCHEDSTATS
 	help
 		Various statistics for debugging GVFS
-
-config GVFS_VERBOSE
-	bool "Some warning messages from GVFS"
-	default y
-	depends on GVFS
-	help
-		Some warning messages from GVFS.
-		The messages are rare, but do not select this option
-		if you want optimize the code size as much as possible.
 
 config GVFS_INTERVAL_SMT_SHARED
 	int "Target interval for cores sharing pipelines (ms)"
@@ -919,7 +921,6 @@ config GVFS_TOLERANCE_PERCENT
 	depends on GVFS
 	default 30
 
-
 config GVFS_TARGET_DIFF_THRESHOLD
 	int "Target difference threshold for source activated balancing"
 	range 2 100
@@ -931,12 +932,15 @@ config GVFS_TARGET_DIFF_THRESHOLD
 		the source cpu activated the target vruntime balancing.
 
 
-config GVFS_INFEASIBLE_WEIGHT
-	bool "Detect infeasible weight and heal it"
-	default y
+config GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+	int "Target difference threshold for detecting infeasible weight"
+	range 2 100
+	default 10
 	depends on GVFS
 	help
-		Detect infeasible weight if
+		Target difference threshold for detecting infeasible weight
+		
+		GVFS detects infeasible weight if
 		  1. target diff >= GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 		  2. nr_running = 1
 		  3. lagged_weight > others' lagged_weight
@@ -946,88 +950,17 @@ config GVFS_INFEASIBLE_WEIGHT
 			1. when the CPU becomes idle.
 			2. when target diff < GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
 
-
-config GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
-	int "Target difference threshold for detecting infeasible weight"
-	range 2 100
-	default 10
-	depends on GVFS && GVFS_INFEASIBLE_WEIGHT
-	help
-		Target difference threshold for detecting infeasible weight
-
-
-config GVFS_RB_LEFTMOST_FIRST
-	bool "Consider rb_leftmost task first while active balancing"
-	default y
-	depends on GVFS
-	help
-		While active load balancing, considering rb_leftmost tasks first may be benefitial,
-		since it is likely to have large lagged value.
-
-
-config PRINT_SCHED_DOMAIN_AT_SCHED_DEBUG
-	bool "Print detailed informaion of sched_domain at sched_debug"
-	default y
-	depends on GVFS
-	help
-		When cat /proc/sched_debug, the detailed structual information
-		(including pointer addresses) is shown.
-		This is for debug.
-
-config GVFS_BALANCING_IGNORE_LOCAL_GROUP
-	bool "Target vruntime balancing ignore local group, not just local cpu"
-	default y
-	depends on GVFS
-	help
-		Basically, GVFS ignore only local cpu when balancing.
-		However, all cpus in a local group were considered at lower domain.
-		Thus, ignoring whole cpus in a local group is good idea.
-		But, not tested yet.
-
-config GVFS_DISABLE_ORIGINAL_BALANCING
-	bool 'Disable the original load balancing'
-	default n
-	depends on GVFS
-	help
-		Disable the original version of load balancing.
-		Currently, only idle_balance() is disabled.
-
-config GVFS_CONSIDER_UTIL
-	bool 'Consider cpu utilization of each task for lagged'
-	default y
-	depends on GVFS
-	help
-		When calculating lagged, consider se->avg.util_avg value.
-		1. eff_weight_real = eff_load.weight(w/o normalization) * util_avg >> 10
-		2. use eff_weight_real instead of eff_load.weight to calculat lagged.
-
 config GVFS_LAGGED_WEIGHT_ADDED_BITS
 	int 'The number of added bits to improve the accuracy of lagged_weight'
 	range 0 10
-	depends on (GVFS_CONSIDER_UTIL || GVFS_AMP)
+	depends on GVFS
 	default 4
 	help
 		If this value is 0, the accuracy of lagged_weight is 10.
 		For smp,
-		  eff_weight_real = eff_weight_real * util_avg >> (10 - ADDED_BITS)
+		  eff_weight_real = eff_weight_real * util_avg >> (SCHED_LOAD_SHIFT - ADDED_BITS)
 		For amp,
 		  eff_weight_real = eff_weight_real * util_avg << (ADDED_BITS) / efficiency[type]
-
-config GVFS_REAL_MIN_VRUNTIME
-	bool 'Use real min_vruntime instead of cfs_rq->min_vruntime'
-	default y
-	depends on GVFS
-	help
-		cfs_rq->min_vruntime don't go backward.
-		Use real min_vruntime when check the target.
-
-config GVFS_LARGE_GROUP_SHARES
-	bool 'Multiply shares of groups by number of possible cpus'
-	default n
-	depends on GVFS
-	help
-		When set shares of groups, multiply the value by number of possible cpus.
-		This prevents the frequent target value updates.
 
 config IKCONFIG
 	tristate "Kernel .config support"

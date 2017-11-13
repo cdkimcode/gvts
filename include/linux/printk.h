@@ -469,12 +469,4 @@ static inline void print_hex_dump_debug(const char *prefix_str, int prefix_type,
 }
 #endif
 
-#ifdef CONFIG_GVFS_VERBOSE
-#define gvfs_msg(fmt, ...) \
-	printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
-#else
-#define gvfs_msg(fmt, ...) \
-	no_printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
-#endif
-
 #endif
