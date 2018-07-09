@@ -36,7 +36,7 @@ extern void update_cpu_load_active(struct rq *this_rq);
 static inline void update_cpu_load_active(struct rq *this_rq) { }
 #endif
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 /* refer to max_vruntime() */
 #define vruntime_passed(min_vruntime, target_vruntime) \
 			((s64)((min_vruntime) - (target_vruntime)) >= 0)
@@ -53,7 +53,7 @@ static inline void update_cpu_load_active(struct rq *this_rq) { }
 #define TG_LOAD_SUM_CHANGE 0x10
 #endif
 
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 #define for_each_type(type) \
 			for (type = 0; type < NUM_CPU_TYPES; type++)
 
@@ -64,7 +64,7 @@ static inline void update_cpu_load_active(struct rq *this_rq) { }
 #define EFFICIENCY_ESTIMATE 3 /* estimated */
 
 extern __read_mostly unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES];
-#endif /* CONFIG_GVFS_AMP */
+#endif /* CONFIG_GVTS_AMP */
 
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
@@ -285,9 +285,9 @@ struct task_group {
 	 * will also be accessed at each tick.
 	 */
 	atomic_long_t load_avg ____cacheline_aligned;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	atomic_long_t load_sum ____cacheline_aligned; /* this is also heavily contended at clock tick time */
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 #endif /* CONFIG_SMP */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -399,7 +399,7 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64 min_vruntime_copy;
 #endif
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	u64 real_min_vruntime; /* can go backward */
 #ifndef CONFIG_64BIT
 	u64 real_min_vruntime_copy;
@@ -419,7 +419,7 @@ struct cfs_rq {
 	 */
 	s64 lagged;
 	unsigned long lagged_weight;
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 
 	struct rb_root tasks_timeline;
 	struct rb_node *rb_leftmost;
@@ -484,16 +484,16 @@ struct cfs_rq {
 
 	u64 throttled_clock, throttled_clock_task;
 	u64 throttled_clock_task_time;
-#ifdef CONFIG_GVFS_BANDWIDTH
+#ifdef CONFIG_GVTS_BANDWIDTH
 	u64 throttled_target;
 #endif
 	int throttled, throttle_count;
 	struct list_head throttled_list;
 
-#ifdef CONFIG_GVFS_BANDWIDTH
+#ifdef CONFIG_GVTS_BANDWIDTH
 	struct list_head state_q[2];
 	struct list_head *active_q, *thrott_q;
-#endif /* CONFIG_GVFS_BANDWIDTH */
+#endif /* CONFIG_GVTS_BANDWIDTH */
 #endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 };
@@ -636,7 +636,7 @@ struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t lock;
 
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	int cpu_type;
 #endif
 	/*
@@ -693,7 +693,7 @@ struct rq {
 #ifdef CONFIG_SMP
 	struct root_domain *rd;
 	struct sched_domain *sd;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	struct sd_vruntime *sd_vruntime;
 	int infeasible_weight;
 #endif
@@ -764,7 +764,7 @@ struct rq {
 	unsigned int ttwu_local;
 #endif
 
-#ifdef CONFIG_GVFS_STATS
+#ifdef CONFIG_GVTS_STATS
 	unsigned int largest_idle_min_vruntime_racing;
 	/* target_vruntime_balance() stats */
 	unsigned int tvb_count[CPU_MAX_IDLE_TYPES];
@@ -782,9 +782,9 @@ struct rq {
 	/* get_min_target() stats */
 	unsigned int get_traverse_rq_count;
 	unsigned int get_traverse_child_count;
-	/* GVFS_BANDWIDTH */
+	/* GVTS_BANDWIDTH */
 	unsigned int iterate_thrott_q;
-#endif /* CONFIG_GVFS_STATS */
+#endif /* CONFIG_GVTS_STATS */
 
 #ifdef CONFIG_SMP
 	struct llist_head wake_list;
@@ -977,7 +977,7 @@ struct sched_group {
 	unsigned long cpumask[0];
 };
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 struct sd_vruntime {
 	atomic_t updated_by; /* cpu id who updates the target */
 	atomic64_t target;

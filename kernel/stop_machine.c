@@ -75,12 +75,12 @@ static void __cpu_stop_queue_work(struct cpu_stopper *stopper,
 	wake_up_process(stopper->thread);
 }
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 int cpu_stop_thread_on_cpu(unsigned int cpu) {
 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
 	return stopper->thread->on_cpu;
 }
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 
 /* queue @work to @stopper.  if offline, @work is completed immediately */
 static bool cpu_stop_queue_work(unsigned int cpu, struct cpu_stop_work *work)

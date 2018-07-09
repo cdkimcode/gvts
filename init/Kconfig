@@ -787,7 +787,7 @@ config BUILD_BIN2C
 	bool
 	default n
 
-config GVFS
+config GVTS
 	bool "Global Virtual-time Fair Scheduler by CDKIM"
 	default y
 	help
@@ -800,7 +800,7 @@ config GVFS
 		* Topology-aware hierarchical balancing for scalability
 		The 'interval' length, the amount of target increase for each interval, 
 		determines the accuracy of fairness and the frequency of thread migreation.
-		GVFS awares the topology and uses the long interval length for NUMA,
+		GVTS awares the topology and uses the long interval length for NUMA,
 		and the short interval length for SMT.
 		This mitigates the thread migration overhead and improves fairness accuracy.
 
@@ -821,7 +821,7 @@ config GVFS
 		the next target as simultaneously as possible.
 		- When calculating lagged, consider se->avg.util_avg value.
 		  eff_weight_real = eff_load.weight(w/o normalization) * util_avg 
-		                         >> (SCHED_LOAD_SHIFT - CONFIG_GVFS_LAGGED_WEIGHT_ADDED_BITS)
+		                         >> (SCHED_LOAD_SHIFT - CONFIG_GVTS_LAGGED_WEIGHT_ADDED_BITS)
 		  and use eff_weight_real instead of eff_load.weight to calculat lagged.
 
 		* New vruntime normalization for slept or throttled tasks
@@ -840,120 +840,120 @@ config GVFS
 		  since the local group CPUs was balanced at the lower level domain.
 
 
-config GVFS_BANDWIDTH
-	bool "Support for bandwidth control in GVFS (EXPERIMENTAL)"
+config GVTS_BANDWIDTH
+	bool "Support for bandwidth control in GVTS (EXPERIMENTAL)"
 	default y
-	depends on GVFS && CFS_BANDWIDTH
+	depends on GVTS && CFS_BANDWIDTH
 	help
-		Support for bandwidth control (CFS_BANDWIDTH) in GVFS
+		Support for bandwidth control (CFS_BANDWIDTH) in GVTS
 		Currently, this does not work properly for some cases.
 
-config GVFS_DEBUG_NORMALIZATION
+config GVTS_DEBUG_NORMALIZATION
 	bool "Debug normalization of vruntime"
 	default n
-	depends on GVFS
+	depends on GVTS
 	help
 		Debug information for virtual time normalization when a task is waking up
 
-config GVFS_AMP
-	bool "AMP support of GVFS"
+config GVTS_AMP
+	bool "AMP support of GVTS"
 	default y
-	depends on GVFS
+	depends on GVTS
 	help
-		GVFS for AMP.
+		GVTS for AMP.
 		efficiency (and efficiency modes) for tasks.
 		define cpu types for each rq.
 		minimize max(lagged_src, lagged_dst) at targer vruntime balancing.
 		Try to balance even if only 1 task at source runqueue when source is slower than destination.
-		faster-core-first for NOHZ of GVFS_AMP
+		faster-core-first for NOHZ of GVTS_AMP
 
-config GVFS_NUM_CPU_TYPES
+config GVTS_NUM_CPU_TYPES
 	int "Number of CPU types"
 	range 1 16
 	default 2
-	depends on GVFS_AMP
+	depends on GVTS_AMP
 	help
-		The number of CPU types supported by GVFS.
+		The number of CPU types supported by GVTS.
 
-config GVFS_BASE_CPU_TYPE
+config GVTS_BASE_CPU_TYPE
 	int "CPU type id for the base performance"
 	range -1 15
-	depends on GVFS_AMP
+	depends on GVTS_AMP
 	default -1
 	help
 		The CPU type id used to define the base performance.
-		This value should be smaller than GVFS_NUM_CPU_TYPES
+		This value should be smaller than GVTS_NUM_CPU_TYPES
 		If this says -1, FAIR_SHARE is used.
 		FAIR_SHARE = SUM(num_type_i_cpus * efficiency[i]) / SUM(num_type_i_cpus)
 
-config GVFS_STATS
-	bool "Schedstats for GVFS"
+config GVTS_STATS
+	bool "Schedstats for GVTS"
 	default y
-	depends on GVFS && SCHEDSTATS
+	depends on GVTS && SCHEDSTATS
 	help
-		Various statistics for debugging GVFS
+		Various statistics for debugging GVTS
 
-config GVFS_INTERVAL_SMT_SHARED
+config GVTS_INTERVAL_SMT_SHARED
 	int "Target interval for cores sharing pipelines (ms)"
 	range 1 3000
-	depends on GVFS
+	depends on GVTS
 	default 30
 
-config GVFS_INTERVAL_LLC_SHARED
+config GVTS_INTERVAL_LLC_SHARED
 	int "Target interval for cores sharing a LLC (ms)"
 	range 1 3000
-	depends on GVFS
+	depends on GVTS
 	default 90
 
-config GVFS_INTERVAL_NUMA
+config GVTS_INTERVAL_NUMA
 	int "Target interval for cores in different nodes (ms)"
 	range 1 3000
-	depends on GVFS
+	depends on GVTS
 	default 150
 	help
 	  1000 indicates 1s target interval for local nodes,
 	  and 2s target interval for remote nodes.
 	  interval = value / 10 * numa_distance
 
-config GVFS_TOLERANCE_PERCENT
+config GVTS_TOLERANCE_PERCENT
 	int "Tolerance value as a percentage of target interval."
 	range 0 100
-	depends on GVFS
+	depends on GVTS
 	default 30
 
-config GVFS_TARGET_DIFF_THRESHOLD
+config GVTS_TARGET_DIFF_THRESHOLD
 	int "Target difference threshold for source activated balancing"
 	range 2 100
 	default 3
-	depends on GVFS
+	depends on GVTS
 	help
 		When difference between cfs_rq->target_vruntime and rq->sd_vruntime->target
-		is larger than CONFIG_GVFS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
+		is larger than CONFIG_GVTS_TARGET_DIFF_THRESHOLD * sd_vruntime->interval,
 		the source cpu activated the target vruntime balancing.
 
 
-config GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+config GVTS_TARGET_DIFF_INFEASIBLE_WEIGHT
 	int "Target difference threshold for detecting infeasible weight"
 	range 2 100
 	default 10
-	depends on GVFS
+	depends on GVTS
 	help
 		Target difference threshold for detecting infeasible weight
 		
-		GVFS detects infeasible weight if
-		  1. target diff >= GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+		GVTS detects infeasible weight if
+		  1. target diff >= GVTS_TARGET_DIFF_INFEASIBLE_WEIGHT
 		  2. nr_running = 1
 		  3. lagged_weight > others' lagged_weight
 		  Then, delete_min_target and do not update min_target for the task
 
 		The infeasibility of a CPU will be cleared 
 			1. when the CPU becomes idle.
-			2. when target diff < GVFS_TARGET_DIFF_INFEASIBLE_WEIGHT
+			2. when target diff < GVTS_TARGET_DIFF_INFEASIBLE_WEIGHT
 
-config GVFS_LAGGED_WEIGHT_ADDED_BITS
+config GVTS_LAGGED_WEIGHT_ADDED_BITS
 	int 'The number of added bits to improve the accuracy of lagged_weight'
 	range 0 10
-	depends on GVFS
+	depends on GVTS
 	default 4
 	help
 		If this value is 0, the accuracy of lagged_weight is 10.

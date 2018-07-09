@@ -93,7 +93,7 @@ void nmi_panic(struct pt_regs *regs, const char *msg)
 }
 EXPORT_SYMBOL(nmi_panic);
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 void dump_sched(void);
 #endif
 /**
@@ -153,7 +153,7 @@ void panic(const char *fmt, ...)
 	 */
 	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1) {
 		dump_stack();
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		dump_sched();
 #endif
 	}

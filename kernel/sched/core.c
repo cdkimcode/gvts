@@ -111,14 +111,14 @@ void update_rq_clock(struct rq *rq)
 	update_rq_clock_task(rq, delta);
 }
 
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 #if NUM_CPU_TYPES == 2
 unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES] = {1024, 1703};
 #else
 ERROR "DEFAULT_EFFICIENCY is not defined."
 #endif
 
-#if CONFIG_GVFS_BASE_CPU_TYPE == -1 /* fair share base */
+#if CONFIG_GVTS_BASE_CPU_TYPE == -1 /* fair share base */
 
 static __read_mostly atomic_t num_cpus_type_ver = {0}; /* odd: changing, even: stable */
 static __read_mostly atomic_t num_cpus_type[NUM_CPU_TYPES];
@@ -142,10 +142,10 @@ static void __set_rq_cpu_type(struct rq *rq, int new)
 	atomic_inc(&num_cpus_type_ver); /* now, even; stable... */
 	smp_mb();
 }
-#else /* CONFIG_GVFS_BASE_CPU_TYPE >= 0 */
+#else /* CONFIG_GVTS_BASE_CPU_TYPE >= 0 */
 static inline void __init init_rq_cpu_type(struct rq *rq) { rq->cpu_type = 0; }
 static inline void __set_rq_cpu_type(struct rq *rq, int new) { rq->cpu_type = new; }
-#endif /* CONFIG_GVFS_BASE_CPU_TYPE >= 0 */
+#endif /* CONFIG_GVTS_BASE_CPU_TYPE >= 0 */
 static void set_rq_cpu_type(struct rq *rq, int type)
 {
 	if (rq->cpu_type == type)
@@ -165,9 +165,9 @@ void normalize_efficiency(struct task_struct *p)
 {
 	unsigned long base;
 	int type;
-#if CONFIG_GVFS_BASE_CPU_TYPE >= 0
-	base = p->__effi[CONFIG_GVFS_BASE_CPU_TYPE];
-#else /* CONFIG_GVFS_BASE_CPU_TYPE == -1, that is, fair share base */
+#if CONFIG_GVTS_BASE_CPU_TYPE >= 0
+	base = p->__effi[CONFIG_GVTS_BASE_CPU_TYPE];
+#else /* CONFIG_GVTS_BASE_CPU_TYPE == -1, that is, fair share base */
 	int num_cpus, num_cpus_total = 0;
 	int version;
 
@@ -191,7 +191,7 @@ printk(KERN_ERR "num_cpus_total: %d num_cpus_type_ver: %d base: %ld __effi: %ld 
 	if (unlikely(!num_cpus_total))
 		num_cpus_total = 1;
 	base = (base + (num_cpus_total >> 1)) / num_cpus_total;
-#endif /* CONFIG_GVFS_BASE_CPU_TYPE == -1 */
+#endif /* CONFIG_GVTS_BASE_CPU_TYPE == -1 */
 	if (unlikely(!base))
 		base = 1024;
 	for_each_type(type)
@@ -208,13 +208,13 @@ printk(KERN_ERR "num_cpus_total: %d num_cpus_type_ver: %d base: %ld __effi: %ld 
 
 #define set_efficiency_default(p) __set_efficiency_mode(p, EFFICIENCY_DEFAULT, DEFAULT_EFFICIENCY)
 
-#endif /* CONFIG_GVFS_AMP */
+#endif /* CONFIG_GVTS_AMP */
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 /* remember tasks and related things */
 struct task_runtime_info {
 	u64 sum_exec_runtime;
-	/* below two are meaningless if CONFIG_GVFS_AMP is not defined */
+	/* below two are meaningless if CONFIG_GVTS_AMP is not defined */
 	u64 sum_perf_runtime;
 	u64 sum_type_runtime[NUM_CPU_TYPES];
 };
@@ -230,10 +230,10 @@ struct remember_info {
 	u64 vruntime_init;
 	u64 vruntime_end;
 	u64 sum_exec_runtime;
-	/* below two are meaningless if CONFIG_GVFS_AMP is not defined */
+	/* below two are meaningless if CONFIG_GVTS_AMP is not defined */
 	u64 sum_perf_runtime;
 	u64 sum_type_runtime[NUM_CPU_TYPES];
-#ifdef CONFIG_GVFS_DEBUG_NORMALIZATION
+#ifdef CONFIG_GVTS_DEBUG_NORMALIZATION
 	unsigned int num_normalization;
 	u64 added_normalization;
 	u64 max_added_normalization;
@@ -369,12 +369,12 @@ remember_task_exit(struct task_struct *p) {
 	info->vruntime_end = p->se.vruntime;
 	info->walltime = jiffies_to_nsecs(now - (unsigned long) info->walltime);
 	info->sum_exec_runtime = p->se.sum_exec_runtime;
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	info->sum_perf_runtime = p->se.sum_perf_runtime;
 	for_each_type(type)
 		info->sum_type_runtime[type] = p->se.sum_type_runtime[type];
 #endif
-#ifdef CONFIG_GVFS_DEBUG_NORMALIZATION
+#ifdef CONFIG_GVTS_DEBUG_NORMALIZATION
 	info->num_normalization = p->se.num_normalization;
 	info->added_normalization = p->se.added_normalization;
 	info->max_added_normalization = p->se.max_added_normalization;
@@ -500,7 +500,7 @@ free:
 
 	return ret;
 }
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 
 /*
  * Debugging: various feature bits
@@ -1080,7 +1080,7 @@ int tg_nop(struct task_group *tg, void *data)
 }
 #endif
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 void update_tg_load_sum(struct sched_entity *se, struct task_group *tg, 
 						unsigned long old, unsigned long new, 
 						int no_update_if_zero); 
@@ -1090,10 +1090,10 @@ static void set_load_weight(struct task_struct *p)
 {
 	int prio = p->static_prio - MAX_RT_PRIO;
 	struct load_weight *load = &p->se.load;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	unsigned long old_weight = load->weight;
 #endif
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	int type;
 #endif
 
@@ -1108,15 +1108,15 @@ static void set_load_weight(struct task_struct *p)
 
 	load->weight = scale_load(sched_prio_to_weight[prio]);
 	load->inv_weight = sched_prio_to_wmult[prio];
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	if (p->sched_class == &fair_sched_class) {
 		p->se.eff_load.weight = 0;
 		p->se.eff_load.inv_weight = 0;
 		p->se.eff_weight_real = 0;
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 		for_each_type(type)
 			p->se.__lagged_weight[type] = 0;
-#endif /* !CONFIG_GVFS_AMP */
+#endif /* !CONFIG_GVTS_AMP */
 		p->se.lagged_weight = 0;
 		update_tg_load_sum(&p->se, p->sched_task_group, 
 				old_weight, load->weight, TG_LOAD_SUM_CHANGE);
@@ -2493,22 +2493,22 @@ void __dl_clear_params(struct task_struct *p)
  */
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	struct task_struct *curr = current;
 #endif
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	int type;
 #endif
 
 	p->on_rq			= 0;
 
 	p->se.on_rq			= 0;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	p->se.eff_load.weight = 0; /* Not yet set. This is context dependent value. */
 	p->se.eff_load.inv_weight = 0;
 	p->se.curr_child = NULL; /* always NULL for leaf sched_entity */
 	p->se.eff_weight_real = 0;
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	if (curr && curr->effi_mode) {
 		p->effi_mode = curr->effi_mode;
 		for_each_type(type)
@@ -2521,29 +2521,29 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.effi = p->effi;
 	for_each_type(type)
 		p->se.__lagged_weight[type] = 0;
-#endif /* CONFIG_GVFS_AMP */
+#endif /* CONFIG_GVTS_AMP */
 	p->se.lagged_weight = 0;
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 	p->se.exec_start		= 0;
 	p->se.sum_exec_runtime		= 0;
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	p->se.sum_perf_runtime = 0;
 	p->se.vruntime_rem = 0;
 	p->se.perf_rem = 0;
 	for_each_type(type)
 		p->se.sum_type_runtime[type] = 0;
-#endif /* CONFIG_GVFS_AMP */
+#endif /* CONFIG_GVTS_AMP */
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	p->se.cfs_rq			= NULL;
-#ifdef CONFIG_GVFS_BANDWIDTH
+#ifdef CONFIG_GVTS_BANDWIDTH
 	p->se.state_q = NULL;
 	INIT_LIST_HEAD(&p->se.state_node);
-#endif /* CONFIG_GVFS_BANDWIDTH */
+#endif /* CONFIG_GVTS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_SCHEDSTATS
@@ -2551,10 +2551,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
 #endif
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	p->se.tg_load_sum_contrib = 0;
 #endif
-#ifdef CONFIG_GVFS_DEBUG_NORMALIZATION
+#ifdef CONFIG_GVTS_DEBUG_NORMALIZATION
 	p->se.num_normalization = 0;
 	p->se.added_normalization = 0;
 	p->se.max_added_normalization = 0;
@@ -2771,7 +2771,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	set_task_cpu(p, cpu);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	remember_task_fork(p, current);
 #endif
 
@@ -3581,7 +3581,7 @@ again:
 	BUG(); /* the idle class will always have a runnable task */
 }
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 void transit_busy_to_idle(struct rq *rq);
 void transit_idle_to_busy(struct rq *rq);
 #endif
@@ -3702,7 +3702,7 @@ static void __sched notrace __schedule(bool preempt)
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		if (unlikely(next == rq->idle && rq->cfs.was_idle == CFS_RQ_WAS_BUSY))
 			transit_busy_to_idle(rq);
 #endif
@@ -5426,7 +5426,7 @@ out_unlock:
 	return retval;
 }
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 static int do_remember_task(pid_t pid) {
 	struct task_struct *p; 
 	long retval;
@@ -5461,7 +5461,7 @@ static void __do_get_task_runtime(struct task_struct *p, struct task_runtime_inf
 	struct task_struct *t = p;
 	struct task_struct *pos;
 	int init_tid = 0;
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	int type;
 #endif
 
@@ -5476,11 +5476,11 @@ static void __do_get_task_runtime(struct task_struct *p, struct task_runtime_inf
 		}
 
 		info->sum_exec_runtime += t->se.sum_exec_runtime;	
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 		info->sum_perf_runtime += t->se.sum_perf_runtime;
 		for_each_type(type)
 			info->sum_type_runtime[type] += t->se.sum_type_runtime[type];
-#endif /* CONFIG_GVFS_AMP */
+#endif /* CONFIG_GVTS_AMP */
 
 		if (!list_empty(&t->children)) {
 			int init_child_tid = 0;
@@ -5546,7 +5546,7 @@ out_unlock:
 	return 0;
 }
 
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 static long set_efficiency(struct task_struct *p, unsigned int mode, unsigned long *effi)
 {
 	int type;
@@ -5655,10 +5655,10 @@ out_unlock:
 
 	return mode;
 }
-#endif /* CONFIG_GVFS_AMP */
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS_AMP */
+#endif /* CONFIG_GVTS */
 
-/* Definition of operations of gvfs system call */
+/* Definition of operations of gvts system call */
 #define SET_FAST_CORE               0 /* obsolute */
 #define SET_SLOW_CORE               1 /* obsolute */
 #define SET_UNIT_VRUNTIME	        2 /* obsolute */
@@ -5674,16 +5674,16 @@ out_unlock:
 #define REMEMBER_TASK				13
 #define GET_REMEMBERED_INFO			14
 /**
- * sys_gvfs - set/change the gvfs related things, especially for gvfs_amp
+ * sys_gvts - set/change the gvts related things, especially for gvts_amp
  * @op: the operation id
  * @id: cpu id or pid, mostly
  * @num: a number, e.g., unit_vruntime
  * @vars: a user space pointer for large parameter
  */
-SYSCALL_DEFINE4(gvfs, int, op, int, id, u64, num, void __user *, vars)
+SYSCALL_DEFINE4(gvts, int, op, int, id, u64, num, void __user *, vars)
 {
 	switch(op) {
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		/* for compatibility */
 	case SET_FAST_CORE:
 	case SET_SLOW_CORE:
@@ -5705,7 +5705,7 @@ SYSCALL_DEFINE4(gvfs, int, op, int, id, u64, num, void __user *, vars)
 				return -EINVAL;
 			return do_get_task_runtime(id, vars);
 
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 	case SET_CPU_TYPE:
 			if (num >= NUM_CPU_TYPES || vars)
 				return -EINVAL;
@@ -5723,13 +5723,13 @@ SYSCALL_DEFINE4(gvfs, int, op, int, id, u64, num, void __user *, vars)
 	case GET_EFFICIENCY:
 			return do_get_efficiency(id, num, vars);
 
-#else /* !CONFIG_GVFS_AMP */
+#else /* !CONFIG_GVTS_AMP */
 	case SET_CPU_TYPE:	
 	case GET_CPU_TYPE:
 	case SET_EFFICIENCY:
 	case GET_EFFICIENCY:
 			return -EINVAL;
-#endif  /* !CONFIG_GVFS_AMP */
+#endif  /* !CONFIG_GVTS_AMP */
 	case REMEMBER_TASK:
 			if (num || vars)
 				return -EINVAL;
@@ -5755,7 +5755,7 @@ SYSCALL_DEFINE4(gvfs, int, op, int, id, u64, num, void __user *, vars)
 			} else
 				return -EINVAL;
 
-#endif /* CONFIG_GVFS */	
+#endif /* CONFIG_GVTS */	
 	default: /* invalid operation */
 		return -EINVAL;
 	}
@@ -6704,7 +6704,7 @@ static void update_top_cache_domain(int cpu)
 	rcu_assign_pointer(per_cpu(sd_asym, cpu), sd);
 }
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 /* @sd: sched domain which will be assigned to rq->sd */
 static void
 cpu_attach_sdv(struct rq *rq, struct sched_domain *sd) {
@@ -6744,7 +6744,7 @@ cpu_attach_sdv(struct rq *rq, struct sched_domain *sd) {
 		}
 	}
 }
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 
 static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 {
@@ -6768,7 +6768,7 @@ static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 			if (parent->flags & SD_PREFER_SIBLING)
 				tmp->flags |= SD_PREFER_SIBLING;
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 			if (parent->vruntime) {
 				struct sd_vruntime *sdv = parent->vruntime; /* to be deleted */
 				struct sd_vruntime *parent_sdv = sdv->parent;
@@ -6815,14 +6815,14 @@ static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 				atomic_dec(&sdv->ref);
 				parent->vruntime = NULL;
 			}
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 			destroy_sched_domain(parent, cpu);
 		} else
 			tmp = tmp->parent;
 	}
 
 	if (sd && sd_degenerate(sd)) {
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		if (sd->vruntime) {
 			struct sd_vruntime *sdv, *parent_sdv, *prev;
 			sdv = sd->vruntime;
@@ -6853,7 +6853,7 @@ static struct sched_domain *cpu_merge_domain(struct sched_domain *sd, int cpu)
 			atomic_dec(&sdv->ref);
 			sd->vruntime = NULL;
 		}
-#endif /* CONFIG_GVFS */
+#endif /* CONFIG_GVTS */
 		tmp = sd;
 		sd = sd->parent;
 		destroy_sched_domain(tmp, cpu);
@@ -6878,7 +6878,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 
 	rq_attach_root(rq, rd);
 	tmp = rq->sd;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	cpu_attach_sdv(rq, sd);
 #endif
 	rcu_assign_pointer(rq->sd, sd);
@@ -7101,7 +7101,7 @@ build_sched_groups(struct sched_domain *sd, int cpu)
 	return 0;
 }
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 /* show the structure of scheduing domains */
 static char cpu_str[nr_cpumask_bits + 1];
 static char *cpumask_str(const struct cpumask *cpu_map) {
@@ -7349,7 +7349,7 @@ static void claim_allocations(int cpu, struct sched_domain *sd)
 	WARN_ON_ONCE(*per_cpu_ptr(sdd->sd, cpu) != sd);
 	*per_cpu_ptr(sdd->sd, cpu) = NULL;
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	if (atomic_read(&(*per_cpu_ptr(sdd->sdv, cpu))->ref))
 		*per_cpu_ptr(sdd->sdv, cpu) = NULL;
 #endif
@@ -7454,10 +7454,10 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		sd->flags |= SD_PREFER_SIBLING;
 		sd->imbalance_pct = 110;
 		sd->smt_gain = 1178; /* ~15% */
-#ifdef CONFIG_GVFS
-		sd->vruntime_interval = CONFIG_GVFS_INTERVAL_SMT_SHARED * NSEC_PER_MSEC;
-		sd->vruntime_tolerance = CONFIG_GVFS_INTERVAL_SMT_SHARED 
-									* CONFIG_GVFS_TOLERANCE_PERCENT / 100
+#ifdef CONFIG_GVTS
+		sd->vruntime_interval = CONFIG_GVTS_INTERVAL_SMT_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GVTS_INTERVAL_SMT_SHARED 
+									* CONFIG_GVTS_TOLERANCE_PERCENT / 100
 									* NSEC_PER_MSEC;
 #endif
 
@@ -7465,10 +7465,10 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		sd->imbalance_pct = 117;
 		sd->cache_nice_tries = 1;
 		sd->busy_idx = 2;
-#ifdef CONFIG_GVFS
-		sd->vruntime_interval = CONFIG_GVFS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
-		sd->vruntime_tolerance = CONFIG_GVFS_INTERVAL_LLC_SHARED 
-									* CONFIG_GVFS_TOLERANCE_PERCENT / 100
+#ifdef CONFIG_GVTS
+		sd->vruntime_interval = CONFIG_GVTS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GVTS_INTERVAL_LLC_SHARED 
+									* CONFIG_GVTS_TOLERANCE_PERCENT / 100
 									* NSEC_PER_MSEC;
 #endif
 
@@ -7484,15 +7484,15 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 				       SD_BALANCE_FORK |
 				       SD_WAKE_AFFINE);
 		}
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		/* according to include/linux/topology.h,
 		 * numa distance is 10 (for local nodes), 20 (for remote nodes), etc.
 		 * We decide to vruntime_interval as 1s, 2s, etc.
 		 */
-		sd->vruntime_interval = CONFIG_GVFS_INTERVAL_NUMA * NSEC_PER_MSEC 
+		sd->vruntime_interval = CONFIG_GVTS_INTERVAL_NUMA * NSEC_PER_MSEC 
 							* sched_domains_numa_distance[tl->numa_level] / 10;
-		sd->vruntime_tolerance = CONFIG_GVFS_INTERVAL_NUMA 
-							* CONFIG_GVFS_TOLERANCE_PERCENT / 100 /* for tolerance percentage */
+		sd->vruntime_tolerance = CONFIG_GVTS_INTERVAL_NUMA 
+							* CONFIG_GVTS_TOLERANCE_PERCENT / 100 /* for tolerance percentage */
 							* NSEC_PER_MSEC 
 							* sched_domains_numa_distance[tl->numa_level] 
 							/ 10; /* for numa distance unit */
@@ -7504,11 +7504,11 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		sd->cache_nice_tries = 1;
 		sd->busy_idx = 2;
 		sd->idle_idx = 1;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		/* I don't know... just similar to SD_SHARE_PKG_RESOURCES... */
-		sd->vruntime_interval = CONFIG_GVFS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
-		sd->vruntime_tolerance = CONFIG_GVFS_INTERVAL_LLC_SHARED 
-									* CONFIG_GVFS_TOLERANCE_PERCENT / 100
+		sd->vruntime_interval = CONFIG_GVTS_INTERVAL_LLC_SHARED * NSEC_PER_MSEC;
+		sd->vruntime_tolerance = CONFIG_GVTS_INTERVAL_LLC_SHARED 
+									* CONFIG_GVTS_TOLERANCE_PERCENT / 100
 									* NSEC_PER_MSEC;
 #endif
 	}
@@ -7851,7 +7851,7 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 		if (!sdd->sd)
 			return -ENOMEM;
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		sdd->sdv = alloc_percpu(struct sd_vruntime *);
 		if (!sdd->sdv)
 			return -ENOMEM;
@@ -7867,7 +7867,7 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 
 		for_each_cpu(j, cpu_map) {
 			struct sched_domain *sd;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 			struct sd_vruntime *sdv;
 #endif
 			struct sched_group *sg;
@@ -7880,7 +7880,7 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
 
 			*per_cpu_ptr(sdd->sd, j) = sd;
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 			sdv = kzalloc_node(sizeof(struct sd_vruntime) + cpumask_size(),
 					GFP_KERNEL, cpu_to_node(j));
 			if (!sdv)
@@ -7927,7 +7927,7 @@ static void __sdt_free(const struct cpumask *cpu_map)
 				kfree(*per_cpu_ptr(sdd->sd, j));
 			}
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 			if (sdd->sdv)
 				kfree(*per_cpu_ptr(sdd->sdv, j));
 #endif
@@ -7938,7 +7938,7 @@ static void __sdt_free(const struct cpumask *cpu_map)
 		}
 		free_percpu(sdd->sd);
 		sdd->sd = NULL;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		free_percpu(sdd->sdv);
 		sdd->sdv = NULL;
 #endif
@@ -8029,7 +8029,7 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		}
 	}
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 	/* build sd_vruntime */
 	for_each_cpu(i, cpu_map) {
 		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
@@ -8057,7 +8057,7 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 	}
 
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 #if 0 // To show sdv topology while booting 
 	for_each_cpu(i, cpu_map) {
 		int level = 0;
@@ -8093,7 +8093,7 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		*per_cpu_ptr(d.sd, i) = sd;
 	}
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 #if 0
 	/* build sd_vruntime */
 	for_each_cpu(i, cpu_map) {
@@ -8143,7 +8143,7 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 	rcu_read_unlock();
 	ret = 0;
 
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 #if 0 // To show sdv topology while booting 
 	for_each_cpu(i, cpu_map) {
 		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
@@ -8572,7 +8572,7 @@ void __init sched_init(void)
 
 		rq = cpu_rq(i);
 		raw_spin_lock_init(&rq->lock);
-#ifdef CONFIG_GVFS_AMP
+#ifdef CONFIG_GVTS_AMP
 		init_rq_cpu_type(rq);
 #endif
 		rq->nr_running = 0;
@@ -8620,7 +8620,7 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 		rq->sd = NULL;
 		rq->rd = NULL;
-#ifdef CONFIG_GVFS
+#ifdef CONFIG_GVTS
 		rq->sd_vruntime = NULL;
 		rq->infeasible_weight = 0;
 #endif

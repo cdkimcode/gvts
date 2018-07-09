@@ -25,7 +25,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		struct sched_domain *sd;
 		int dcount = 0;
 #endif
-#ifdef CONFIG_GVFS_STATS
+#ifdef CONFIG_GVTS_STATS
 		enum cpu_idle_type itype;
 #endif
 
@@ -40,7 +40,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		    rq->ttwu_count, rq->ttwu_local,
 		    rq->rq_cpu_time,
 		    rq->rq_sched_info.run_delay, rq->rq_sched_info.pcount);
-#ifdef CONFIG_GVFS_STATS
+#ifdef CONFIG_GVTS_STATS
 		seq_printf(seq, " %u %u", 
 			rq->nr_running, 
 			rq->cfs.h_nr_running
@@ -73,7 +73,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 					rq->get_traverse_child_count,
 					rq->iterate_thrott_q
 					);
-#endif /* CONFIG_GVFS_STATS */
+#endif /* CONFIG_GVTS_STATS */
 
 #ifdef CONFIG_SMP
 		/* domain-specific stats */
@@ -102,7 +102,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 			    sd->sbf_count, sd->sbf_balanced, sd->sbf_pushed,
 			    sd->ttwu_wake_remote, sd->ttwu_move_affine,
 			    sd->ttwu_move_balance);
-#ifdef CONFIG_GVFS_STATS
+#ifdef CONFIG_GVTS_STATS
 			seq_printf(seq,
 				   " %u %u %u %u",
 			    sd->atb_count, sd->atb_failed, sd->atb_pushed, sd->atb_pushed_under);
@@ -168,7 +168,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 			for (itype = 0; itype < NUM_MAX_TARGET_DIFF; itype++) {
 				seq_printf(seq, " %u", sd->target_diff[itype]);
 			}
-#endif /* CONFIG_GVFS_STATS */
+#endif /* CONFIG_GVTS_STATS */
 			seq_printf(seq, "\n");
 		}
 		rcu_read_unlock();

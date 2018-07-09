@@ -722,8 +722,8 @@ __SC_COMP(__NR_preadv2, sys_preadv2, compat_sys_preadv2)
 #define __NR_pwritev2 287
 __SC_COMP(__NR_pwritev2, sys_pwritev2, compat_sys_pwritev2)
 
-#define __NR_gvfs 288
-__SYSCALL(__NR_gvfs, sys_gvfs)
+#define __NR_gvts 288
+__SYSCALL(__NR_gvts, sys_gvts)
 
 #undef __NR_syscalls
 #define __NR_syscalls 289
