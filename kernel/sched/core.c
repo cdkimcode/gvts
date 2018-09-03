@@ -7103,7 +7103,8 @@ build_sched_groups(struct sched_domain *sd, int cpu)
 
 #ifdef CONFIG_GVTS
 /* show the structure of scheduing domains */
-static char cpu_str[nr_cpumask_bits + 1];
+/* Note that nr_cpumask_bits <= NR_CPUS. refer to include/linux/cpumask.h */
+static char cpu_str[NR_CPUS + 1];
 static char *cpumask_str(const struct cpumask *cpu_map) {
 	int i;
 	for (i = 0; i < nr_cpumask_bits; i++) {
