@@ -111,112 +111,10 @@ void update_rq_clock(struct rq *rq)
 	update_rq_clock_task(rq, delta);
 }
 
-#ifdef CONFIG_GVTS_AMP
-#if NUM_CPU_TYPES == 2
-unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES] = {1024, 1703};
-#else
-ERROR "DEFAULT_EFFICIENCY is not defined."
-#endif
-
-#if CONFIG_GVTS_BASE_CPU_TYPE == -1 /* fair share base */
-
-static __read_mostly atomic_t num_cpus_type_ver = {0}; /* odd: changing, even: stable */
-static __read_mostly atomic_t num_cpus_type[NUM_CPU_TYPES];
-
-static void __init init_rq_cpu_type(struct rq *rq)
-{
-	rq->cpu_type = 0; /* default type */
-	atomic_inc(&num_cpus_type_ver);
-	atomic_inc(&num_cpus_type[0]);
-	atomic_inc(&num_cpus_type_ver);
-}
-
-static void __set_rq_cpu_type(struct rq *rq, int new) 
-{
-	atomic_inc(&num_cpus_type_ver); /* now, odd: changing... */
-	smp_mb();
-	atomic_inc(&num_cpus_type[new]);
-	atomic_dec(&num_cpus_type[rq->cpu_type]);
-	rq->cpu_type = new;
-	smp_mb();
-	atomic_inc(&num_cpus_type_ver); /* now, even; stable... */
-	smp_mb();
-}
-#else /* CONFIG_GVTS_BASE_CPU_TYPE >= 0 */
-static inline void __init init_rq_cpu_type(struct rq *rq) { rq->cpu_type = 0; }
-static inline void __set_rq_cpu_type(struct rq *rq, int new) { rq->cpu_type = new; }
-#endif /* CONFIG_GVTS_BASE_CPU_TYPE >= 0 */
-static void set_rq_cpu_type(struct rq *rq, int type)
-{
-	if (rq->cpu_type == type)
-		return;
-	raw_spin_lock(&rq->lock);
-	__set_rq_cpu_type(rq, type);
-	raw_spin_unlock(&rq->lock);
-}
-
-static int get_rq_cpu_type(struct rq *rq)
-{
-	return rq->cpu_type;
-}
-
-/* Update p->effi[] based on p->__effi[] */
-void normalize_efficiency(struct task_struct *p)
-{
-	unsigned long base;
-	int type;
-#if CONFIG_GVTS_BASE_CPU_TYPE >= 0
-	base = p->__effi[CONFIG_GVTS_BASE_CPU_TYPE];
-#else /* CONFIG_GVTS_BASE_CPU_TYPE == -1, that is, fair share base */
-	int num_cpus, num_cpus_total = 0;
-	int version;
-
-again:	
-	version = atomic_read(&num_cpus_type_ver);
-	if (unlikely(version % 2 == 1))
-		goto again;
-	
-	base = 0;
-	for_each_type(type) {
-		num_cpus = atomic_read(&num_cpus_type[type]);
-		base += p->__effi[type] * num_cpus;
-		num_cpus_total += num_cpus;
-	}
-
-	if (unlikely(version != atomic_read(&num_cpus_type_ver)))
-		goto again;
-printk(KERN_ERR "num_cpus_total: %d num_cpus_type_ver: %d base: %ld __effi: %ld %ld\n", 
-					num_cpus_total, version, base,
-					p->__effi[0], p->__effi[1]);
-	if (unlikely(!num_cpus_total))
-		num_cpus_total = 1;
-	base = (base + (num_cpus_total >> 1)) / num_cpus_total;
-#endif /* CONFIG_GVTS_BASE_CPU_TYPE == -1 */
-	if (unlikely(!base))
-		base = 1024;
-	for_each_type(type)
-		p->effi[type] = p->__effi[type] << SCHED_LOAD_SHIFT / base;
-}
-
-#define __set_efficiency_mode(p, mode, effi) do {					\
-			int type;										\
-			(p)->effi_mode = mode;			\
-			for_each_type(type)								\
-				(p)->__effi[type] = (effi)[type];	\
-			normalize_efficiency(p);						\
-		} while(0)
-
-#define set_efficiency_default(p) __set_efficiency_mode(p, EFFICIENCY_DEFAULT, DEFAULT_EFFICIENCY)
-
-#endif /* CONFIG_GVTS_AMP */
-
 #ifdef CONFIG_GVTS
 /* remember tasks and related things */
 struct task_runtime_info {
 	u64 sum_exec_runtime;
-	/* below two are meaningless if CONFIG_GVTS_AMP is not defined */
-	u64 sum_perf_runtime;
-	u64 sum_type_runtime[NUM_CPU_TYPES];
 };
 
 struct remember_info {
@@ -230,9 +128,6 @@ struct remember_info {
 	u64 vruntime_init;
 	u64 vruntime_end;
 	u64 sum_exec_runtime;
-	/* below two are meaningless if CONFIG_GVTS_AMP is not defined */
-	u64 sum_perf_runtime;
-	u64 sum_type_runtime[NUM_CPU_TYPES];
 #ifdef CONFIG_GVTS_DEBUG_NORMALIZATION
 	unsigned int num_normalization;
 	u64 added_normalization;
@@ -369,11 +264,6 @@ remember_task_exit(struct task_struct *p) {
 	info->vruntime_end = p->se.vruntime;
 	info->walltime = jiffies_to_nsecs(now - (unsigned long) info->walltime);
 	info->sum_exec_runtime = p->se.sum_exec_runtime;
-#ifdef CONFIG_GVTS_AMP
-	info->sum_perf_runtime = p->se.sum_perf_runtime;
-	for_each_type(type)
-		info->sum_type_runtime[type] = p->se.sum_type_runtime[type];
-#endif
 #ifdef CONFIG_GVTS_DEBUG_NORMALIZATION
 	info->num_normalization = p->se.num_normalization;
 	info->added_normalization = p->se.added_normalization;
@@ -1093,9 +983,6 @@ static void set_load_weight(struct task_struct *p)
 #ifdef CONFIG_GVTS
 	unsigned long old_weight = load->weight;
 #endif
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
 
 	/*
 	 * SCHED_IDLE tasks get minimal weight:
@@ -1113,10 +1000,6 @@ static void set_load_weight(struct task_struct *p)
 		p->se.eff_load.weight = 0;
 		p->se.eff_load.inv_weight = 0;
 		p->se.eff_weight_real = 0;
-#ifdef CONFIG_GVTS_AMP
-		for_each_type(type)
-			p->se.__lagged_weight[type] = 0;
-#endif /* !CONFIG_GVTS_AMP */
 		p->se.lagged_weight = 0;
 		update_tg_load_sum(&p->se, p->sched_task_group, 
 				old_weight, load->weight, TG_LOAD_SUM_CHANGE);
@@ -2493,13 +2376,6 @@ void __dl_clear_params(struct task_struct *p)
  */
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
-#ifdef CONFIG_GVTS_AMP
-	struct task_struct *curr = current;
-#endif
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
-
 	p->on_rq			= 0;
 
 	p->se.on_rq			= 0;
@@ -2508,20 +2384,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.eff_load.inv_weight = 0;
 	p->se.curr_child = NULL; /* always NULL for leaf sched_entity */
 	p->se.eff_weight_real = 0;
-#ifdef CONFIG_GVTS_AMP
-	if (curr && curr->effi_mode) {
-		p->effi_mode = curr->effi_mode;
-		for_each_type(type)
-			p->__effi[type] = curr->__effi[type];
-		for_each_type(type)
-			p->effi[type] = curr->effi[type];
-	} else /* curr == NULL or curr->effi_mode == EFFICIENCY_NOT_INIT */
-		set_efficiency_default(p);
-
-	p->se.effi = p->effi;
-	for_each_type(type)
-		p->se.__lagged_weight[type] = 0;
-#endif /* CONFIG_GVTS_AMP */
 	p->se.lagged_weight = 0;
 #endif /* CONFIG_GVTS */
 	p->se.exec_start		= 0;
@@ -2529,13 +2391,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
-#ifdef CONFIG_GVTS_AMP
-	p->se.sum_perf_runtime = 0;
-	p->se.vruntime_rem = 0;
-	p->se.perf_rem = 0;
-	for_each_type(type)
-		p->se.sum_type_runtime[type] = 0;
-#endif /* CONFIG_GVTS_AMP */
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -5461,9 +5316,6 @@ static void __do_get_task_runtime(struct task_struct *p, struct task_runtime_inf
 	struct task_struct *t = p;
 	struct task_struct *pos;
 	int init_tid = 0;
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
 
 	do {
 		get_task_struct(t);
@@ -5476,11 +5328,6 @@ static void __do_get_task_runtime(struct task_struct *p, struct task_runtime_inf
 		}
 
 		info->sum_exec_runtime += t->se.sum_exec_runtime;	
-#ifdef CONFIG_GVTS_AMP
-		info->sum_perf_runtime += t->se.sum_perf_runtime;
-		for_each_type(type)
-			info->sum_type_runtime[type] += t->se.sum_type_runtime[type];
-#endif /* CONFIG_GVTS_AMP */
 
 		if (!list_empty(&t->children)) {
 			int init_child_tid = 0;
@@ -5545,117 +5392,6 @@ out_unlock:
 
 	return 0;
 }
-
-#ifdef CONFIG_GVTS_AMP
-static long set_efficiency(struct task_struct *p, unsigned int mode, unsigned long *effi)
-{
-	int type;
-
-	switch(mode) {
-	case EFFICIENCY_DEFAULT:
-				if (p->effi_mode != mode)
-					set_efficiency_default(p);
-				return 0;
-
-	case EFFICIENCY_STATIC:
-				for_each_type(type) {
-					if (p->__effi[type] != effi[type])
-						break;
-				}
-
-				if (type == NUM_CPU_TYPES) {
-					if (p->effi_mode != mode)
-						p->effi_mode = mode;
-					return 0;
-				}
-				
-				__set_efficiency_mode(p, mode, effi);
-				return 0;
-				
-	case EFFICIENCY_ESTIMATE:
-				return -EPERM; /* not yet implemented */
-	default:
-				return -EINVAL;
-	}
-}
-
-static long do_set_efficiency(pid_t pid, unsigned int mode, void __user *vars) {
-	long retval = 0;
-	struct task_struct *p;
-	unsigned long effi[NUM_CPU_TYPES];
-
-	/* @vars is required only when mode == STATIC. 
-	   If mode == NOT_INIT, we assume that the user does not want to consider the mode */
-	if (vars && (mode == EFFICIENCY_DEFAULT || mode == EFFICIENCY_ESTIMATE))
-		return -EINVAL;
-	/* If you want to use STATIC mode, please give the efficiency. */
-	if (!vars && mode == EFFICIENCY_STATIC)
-		return -EINVAL;
-
-	if (vars && copy_from_user(effi, vars, sizeof(unsigned long) * NUM_CPU_TYPES))
-		return -EFAULT;
-
-	rcu_read_lock();
-	if (pid == 0)
-		p = current;
-	else {
-		retval = -ESRCH;
-		p = find_process_by_pid(pid);
-		if (!p)
-			goto out_unlock;
-	}
-
-	get_task_struct(p);
-	retval = set_efficiency(p, mode, vars ? effi : NULL); 
-	put_task_struct(p);
-
-out_unlock:
-	rcu_read_unlock();
-
-	return retval;
-}
-
-/* if raw == 1, return the raw value of efficiencies.
-   if raw == 0, return the normalized efficiencies. */
-static int do_get_efficiency(pid_t pid, unsigned int raw, void __user *vars) {
-	int mode = -EINVAL;
-	int type;
-	struct task_struct *p;
-	unsigned long effi[NUM_CPU_TYPES];
-
-	if (!vars)
-		return -EFAULT;
-
-	rcu_read_lock();
-	if (pid == 0)
-		p = current;
-	else {
-		mode = -ESRCH;
-		p = find_process_by_pid(pid);
-		if (!p)
-			goto out_unlock;
-	}
-
-	get_task_struct(p);
-	mode = p->effi_mode;
-	if (raw) {
-		for_each_type(type)
-			effi[type] = p->__effi[type];
-	} else {
-		for_each_type(type)
-			effi[type] = p->effi[type];
-	}
-	put_task_struct(p);
-
-out_unlock:
-	rcu_read_unlock();
-
-	if (copy_to_user(vars, effi, sizeof(unsigned long) * NUM_CPU_TYPES))
-		return -EFAULT;
-
-	return mode;
-}
-#endif /* CONFIG_GVTS_AMP */
 #endif /* CONFIG_GVTS */
 
 /* Definition of operations of gvts system call */
@@ -5667,10 +5403,6 @@ out_unlock:
 #define STOP_MEASURING_IPS_TYPE     5 /* obsolute */
 #define CORE_PINNING                6 /* obsolute */
 #define GET_TASK_RUNTIME			7
-#define SET_CPU_TYPE				8
-#define GET_CPU_TYPE				9
-#define SET_EFFICIENCY				11
-#define GET_EFFICIENCY				12
 #define REMEMBER_TASK				13
 #define GET_REMEMBERED_INFO			14
 /**
@@ -5705,31 +5437,6 @@ SYSCALL_DEFINE4(gvts, int, op, int, id, u64, num, void __user *, vars)
 				return -EINVAL;
 			return do_get_task_runtime(id, vars);
 
-#ifdef CONFIG_GVTS_AMP
-	case SET_CPU_TYPE:
-			if (num >= NUM_CPU_TYPES || vars)
-				return -EINVAL;
-			set_rq_cpu_type(cpu_rq(id), num);
-			return 0;
-
-	case GET_CPU_TYPE:
-			if (num || vars)
-				return -EINVAL;
-			return get_rq_cpu_type(cpu_rq(id));
-
-	case SET_EFFICIENCY:
-			return do_set_efficiency(id, num, vars);
-
-	case GET_EFFICIENCY:
-			return do_get_efficiency(id, num, vars);
-
-#else /* !CONFIG_GVTS_AMP */
-	case SET_CPU_TYPE:	
-	case GET_CPU_TYPE:
-	case SET_EFFICIENCY:
-	case GET_EFFICIENCY:
-			return -EINVAL;
-#endif  /* !CONFIG_GVTS_AMP */
 	case REMEMBER_TASK:
 			if (num || vars)
 				return -EINVAL;
@@ -8573,9 +8280,6 @@ void __init sched_init(void)
 
 		rq = cpu_rq(i);
 		raw_spin_lock_init(&rq->lock);
-#ifdef CONFIG_GVTS_AMP
-		init_rq_cpu_type(rq);
-#endif
 		rq->nr_running = 0;
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;

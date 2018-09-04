@@ -53,19 +53,6 @@ static inline void update_cpu_load_active(struct rq *this_rq) { }
 #define TG_LOAD_SUM_CHANGE 0x10
 #endif
 
-#ifdef CONFIG_GVTS_AMP
-#define for_each_type(type) \
-			for (type = 0; type < NUM_CPU_TYPES; type++)
-
-/* for task->effi_mode */
-#define EFFICIENCY_NOT_INIT 0 /* need to initialize */
-#define	EFFICIENCY_DEFAULT  1 /* default efficiency */
-#define EFFICIENCY_STATIC   2 /* set by syscall */
-#define EFFICIENCY_ESTIMATE 3 /* estimated */
-
-extern __read_mostly unsigned long DEFAULT_EFFICIENCY[NUM_CPU_TYPES];
-#endif /* CONFIG_GVTS_AMP */
-
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
  */
@@ -636,9 +623,6 @@ struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t lock;
 
-#ifdef CONFIG_GVTS_AMP
-	int cpu_type;
-#endif
 	/*
 	 * nr_running and cpu_load should be in the same cacheline because
 	 * remote CPUs use both these fields when doing load calculation.

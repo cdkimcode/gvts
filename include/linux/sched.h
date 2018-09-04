@@ -5,15 +5,6 @@
 
 #include <linux/sched/prio.h>
 
-#ifdef CONFIG_GVTS_AMP
-#define NUM_CPU_TYPES CONFIG_GVTS_NUM_CPU_TYPES
-#if CONFIG_GVTS_BASE_CPU_TYPE >= CONFIG_GVTS_NUM_CPU_TYPES
-ERROR "CONFIG_GVTS_BASE_CPU_TYPE should be smaller than CONFIG_GVTS_NUM_CPU_TYPES"
-#endif
-#else /* !CONFIG_GVTS_AMP */
-#define NUM_CPU_TYPES 2 /* default value */
-#endif
-
 #ifdef CONFIG_GVTS_STATS
 #define NUM_MAX_TARGET_DIFF 10
 #endif
@@ -1334,18 +1325,12 @@ struct sched_entity {
 	u64			sum_exec_runtime;
 	u64			prev_sum_exec_runtime;
 	u64			vruntime;
-#ifdef CONFIG_GVTS_AMP
-	u64			sum_perf_runtime;
-	u32			vruntime_rem;
-	u32			perf_rem;
-	u64			sum_type_runtime[NUM_CPU_TYPES];
-#endif /* CONFIG_GVTS_AMP */
 #ifdef CONFIG_GVTS
 	u64			sleep_start; /* remember the sleep start time
 								to prevent vruntime normalization for short sleep */
 	u64			sleep_target; /* remember the target when start to sleep
 	                             for vruntime normalization */
-#endif /* CONFIG_GVTS_AMP */
+#endif /* CONFIG_GVTS */
 #ifdef CONFIG_GVTS_DEBUG_NORMALIZATION /* for debug */
 	unsigned int num_normalization;
 	u64 added_normalization;
@@ -1390,10 +1375,6 @@ struct sched_entity {
 									or 
 									eff_weight_real * util_avg << ADDED_BITS / efficiency[rq->cpu_type]
 									*/
-#ifdef CONFIG_GVTS_AMP
-	unsigned long *effi; /* a pointer to task->effi related to this se */
-	unsigned long __lagged_weight[NUM_CPU_TYPES]; /* lagged_weight for each type */
-#endif
 	s64 lagged; /* necessary time to reach se->vruntime to lagged_target */
 	u64 lagged_target; /* target used when calculating @lagged. */
 	unsigned long tg_load_sum_contrib;
@@ -1517,11 +1498,6 @@ struct task_struct {
 	int wake_cpu;
 #endif
 	int on_rq;
-#ifdef CONFIG_GVTS_AMP
-	int effi_mode;
-	unsigned long __effi[NUM_CPU_TYPES]; /* set by users or estimations */
-	unsigned long effi[NUM_CPU_TYPES]; /* normalized value of __efficiency */
-#endif
 
 	int prio, static_prio, normal_prio;
 	unsigned int rt_priority;

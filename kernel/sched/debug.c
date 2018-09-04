@@ -1100,15 +1100,8 @@ static void dump_task(struct task_struct *p) {
 }
 
 static void dump_rq(struct rq *rq) {
-	pr_emerg("%-3d"
-#ifdef CONFIG_GVTS_AMP
-			" %4d"
-#endif
-			" %6d %6ld %8d %20s %16lld %16lld %16lld %16lld %16lld %16lld %16lld %10ld\n",
+	pr_emerg("%-3d %6d %6ld %8d %20s %16lld %16lld %16lld %16lld %16lld %16lld %16lld %10ld\n",
 				cpu_of(rq),
-#ifdef CONFIG_GVTS_AMP
-				rq->cpu_type,
-#endif
 				rq->nr_running,
 				rq->load.weight,
 				rq->curr ? task_pid_nr(rq->curr) : -1,
@@ -1133,15 +1126,8 @@ void dump_sched(void) {
 
 	/* header for dump_rq() */
 	pr_emerg("DUMP_RQ\n");
-	pr_emerg("%-3s"
-#ifdef CONFIG_GVTS_AMP
-			" %4s"
-#endif
-			" %6s %6s %8s %20s %16s %16s %16s %16s %16s %16s %16s %10s\n",
+	pr_emerg("%-3s %6s %6s %8s %20s %16s %16s %16s %16s %16s %16s %16s %10s\n",
 				"cpu",
-#ifdef CONFIG_GVTS_AMP
-				"type",
-#endif
 				"nr_run",
 				"weight",
 				"curr_pid",

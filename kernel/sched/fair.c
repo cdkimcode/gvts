@@ -516,11 +516,6 @@ static inline u64 cfs_rq_target_vruntime(struct cfs_rq *cfs_rq) {
 	return cfs_rq->target_vruntime;
 }
 
-#ifdef CONFIG_GVTS_AMP
-static inline s64 task_lagged_type(struct sched_entity *se, u64 target, int type) {
-	return (target - se->vruntime) * se->__lagged_weight[type];
-}
-#endif /* CONFIG_GVTS_AMP */
 static inline s64 task_lagged(struct sched_entity *se, u64 target) {
 	return (target - se->vruntime) * se->lagged_weight;
 }
@@ -537,35 +532,6 @@ static inline s64 rq_lagged(struct rq *rq, u64 target) {
 static inline s64 cpu_lagged(int cpu, u64 target) {
 	return rq_lagged(cpu_rq(cpu), target);
 }
-
-#ifdef CONFIG_GVTS_AMP
-#ifdef CONFIG_FAIR_GROUP_SCHED
-
-static inline unsigned long se_effi(struct sched_entity *se, int type) {
-	BUG_ON(!se->effi); /* if this bug occurs, see set_curr_effi() and put_prev_effi() */
-	return se->effi[type];
-}
-
-static inline void set_curr_effi(struct task_struct *p) {
-	struct sched_entity *se = &p->se;
-	struct sched_entity *parent = se->parent;
-	for_each_sched_entity(parent) 
-		parent->effi = se->effi;
-}
-static inline void put_prev_effi(struct task_struct *p) {
-	struct sched_entity *parent = p->se.parent;
-	for_each_sched_entity(parent) 
-		parent->effi = NULL;
-}
-#else /* !CONFIG_FAIR_GROUP_SCHED */
-static inline unsigned long se_effi(struct sched_entity *se, int type) {
-	BUG_ON(!se->effi);
-	return se->effi[type];
-}
-#define set_curr_effi(p) do{}while(0)
-#define put_prev_effi(p) do{}while(0)
-#endif /* !CONFIG_FAIR_GROUP_SCHED */
-#endif /* CONFIG_GVTS_AMP */
 
 static void
 update_rq_lagged_weight(struct cfs_rq *cfs_rq, struct sched_entity *se, 
@@ -988,33 +954,6 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 
 	return delta;
 }
-
-#ifdef CONFIG_GVTS_AMP
-static inline u64 __calc_delta_effi(u64 delta, unsigned long effi, u32 *rem)
-{
-	if (effi == NICE_0_LOAD)
-		return delta;
-	
-	delta = delta * effi;
-	*rem += delta % SCHED_LOAD_SCALE;
-	delta = delta >> SCHED_LOAD_SHIFT;
-	if (unlikely(*rem >= SCHED_LOAD_SCALE)) {
-		*rem -= SCHED_LOAD_SCALE;
-		delta++;
-	}
-
-	return delta;
-}
-static inline u64 calc_delta_vruntime(u64 delta, unsigned long effi, struct sched_entity *se)
-{
-	delta = calc_delta_fair(delta, se);
-	return __calc_delta_effi(delta, effi, &se->vruntime_rem);
-}
-
-static inline u64 calc_delta_perf(u64 delta, unsigned long effi, struct sched_entity *se) {
-	return __calc_delta_effi(delta, effi, &se->perf_rem);
-}
-#endif /* CONFIG_GVTS_AMP */
 #else
 /*
  * delta /= w
@@ -1130,9 +1069,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
-#ifdef CONFIG_GVTS_AMP
-	int type = rq_of(cfs_rq)->cpu_type;
-#endif
 
 	if (unlikely(!curr))
 		return;
@@ -1150,17 +1086,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_add(cfs_rq, exec_clock, delta_exec);
 
 #ifdef CONFIG_GVTS
-#ifdef CONFIG_GVTS_AMP
-	curr->sum_type_runtime[type] += delta_exec;
-#endif
-
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
-#ifdef CONFIG_GVTS_AMP
-		curr->vruntime += calc_delta_vruntime(delta_exec, se_effi(curr, type), curr);
-#else /* !CONFIG_GVTS_AMP */
 		curr->vruntime += calc_delta_fair(delta_exec, curr);
-#endif /* !CONFIG_GVTS_AMP */
 		update_lagged(curr, &rq_of(cfs_rq)->cfs);
 		update_min_vruntime(cfs_rq);
 
@@ -1174,12 +1102,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		update_min_vruntime(cfs_rq);
 	}
 	
-#ifdef CONFIG_GVTS_AMP
-	/* On AMP systems, scale delta_exec based on efficiency for CFS_BANDWIDTH.
-	   Now, CFS_BANDWIDTH controls the received performance. */
-	delta_exec = calc_delta_perf(delta_exec, se_effi(curr, type), curr);
-	curr->sum_perf_runtime += delta_exec;
-#endif
 	account_cfs_rq_runtime(cfs_rq, delta_exec);
 #else /* !CONFIG_GVTS */
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
@@ -5064,25 +4986,6 @@ static inline void hrtick_update(struct rq *rq)
 #endif
 
 #ifdef CONFIG_GVTS
-
-#ifdef CONFIG_GVTS_AMP
-static inline unsigned long
-calc_lagged_weight(struct sched_entity *se) {
-	unsigned long base, lw;
-	int type;
-	int rq_type = rq_of(cfs_rq_of(se))->cpu_type;
-	
-	base = se->eff_weight_real * se->avg.util_avg 
-				<< CONFIG_GVTS_LAGGED_WEIGHT_ADDED_BITS;
-
-	for_each_type(type) {
-		lw = base / se_effi(se, type);
-		se->__lagged_weight[type] = lw > 0 ? lw : 1;
-	}
-	
-	return se->__lagged_weight[rq_type];
-}
-#else /* !CONFIG_GVTS_AMP */
 static inline unsigned long
 calc_lagged_weight(struct sched_entity *se) {
 	unsigned long eff_weight_real = se->eff_weight_real;
@@ -5096,7 +4999,6 @@ calc_lagged_weight(struct sched_entity *se) {
 	else
 		return 0;
 }
-#endif /* !CONFIG_GVTS_AMP */
 
 static inline int update_lagged_weight(struct sched_entity *pse) {
 	unsigned long lagged_weight = calc_lagged_weight(pse);
@@ -6145,12 +6047,7 @@ find_fastest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 
 		for_each_cpu(i, sched_group_cpus(group)) {
 			if (idle_cpu(i)) {
-#ifdef CONFIG_GVTS_AMP
-				/* for AMP, idleness is determined with default efficiency */
-				num_idle += DEFAULT_EFFICIENCY[cpu_rq(i)->cpu_type];
-#else
 				num_idle++;
-#endif
 			} else {
 				lagged = cpu_lagged(i, target) / group->group_weight;
 				lagged_sum += lagged;
@@ -6182,9 +6079,6 @@ static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group,
 	u64 latest_idle_timestamp = 0;
 	int fastest_cpu = this_cpu;
 	int shallowest_idle_cpu = -1;
-#ifdef CONFIG_GVTS_AMP
-	int shallowest_idle_type = -1;
-#endif
 	int i;
 
 	target = get_sd_target(sd);
@@ -6194,21 +6088,6 @@ static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group,
 		if (idle_cpu(i)) {
 			struct rq *rq = cpu_rq(i);
 			struct cpuidle_state *idle = idle_get_state(rq);
-#ifdef CONFIG_GVTS_AMP
-			if (rq->cpu_type < shallowest_idle_type) {
-				/* rq->cpu_type >= 0 
-				 * shallowest_idle_type >= 0 only if shallowest_idle_cpu >= 0
-				 * => This condition is enough to filter slower idle cpus */
-				continue;
-			} else if (rq->cpu_type > shallowest_idle_type) {
-				if (idle)
-					min_exit_latency = idle->exit_latency;
-				latest_idle_timestamp = rq->idle_stamp;
-				shallowest_idle_cpu = i;
-				shallowest_idle_type = rq->cpu_type;
-				continue;
-			}
-#endif /* CONFIG_GVTS_AMP */
 			if (idle && idle->exit_latency < min_exit_latency) {
 				/*
 				 * We give priority to a CPU whose idle state
@@ -6218,9 +6097,6 @@ static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group,
 				min_exit_latency = idle->exit_latency;
 				latest_idle_timestamp = rq->idle_stamp;
 				shallowest_idle_cpu = i;
-#ifdef CONFIG_GVTS_AMP
-				shallowest_idle_type = rq->cpu_type;
-#endif /* CONFIG_GVTS_AMP */
 			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
 					   rq->idle_stamp > latest_idle_timestamp) {
 				/*
@@ -6230,9 +6106,6 @@ static int find_fastest_cpu(struct sched_domain *sd, struct sched_group *group,
 				 */
 				latest_idle_timestamp = rq->idle_stamp;
 				shallowest_idle_cpu = i;
-#ifdef CONFIG_GVTS_AMP
-				shallowest_idle_type = rq->cpu_type;
-#endif /* CONFIG_GVTS_AMP */
 			}
 		} else if (shallowest_idle_cpu == -1) {
 			lagged = cpu_lagged(i, target);
@@ -6729,10 +6602,6 @@ again:
 
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
-#ifdef CONFIG_GVTS_AMP
-		put_prev_effi(prev);
-		set_curr_effi(p);
-#endif
 	}
 
 	if (hrtick_enabled(rq))
@@ -6766,10 +6635,6 @@ simple:
 	} while (cfs_rq);
 
 	p = task_of(se);
-#ifdef CONFIG_GVTS_AMP
-	/* put_prev_effi() was done at put_prev_task() above */
-	set_curr_effi(p);
-#endif
 
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
@@ -6816,9 +6681,6 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 		cfs_rq = cfs_rq_of(se);
 		put_prev_entity(cfs_rq, se);
 	}
-#ifdef CONFIG_GVTS_AMP
-	put_prev_effi(prev);
-#endif
 }
 
 /*
@@ -7024,9 +6886,6 @@ struct lb_env {
 	u64 interval;
 	u64 tolerance;
 	s64 lagged_diff;
-#endif
-#ifdef CONFIG_GVTS_AMP
-	int slower_src; /* src_rq->cpu_type < dst_rq->cpu_type */
 #endif
 
 	unsigned int		loop;
@@ -8984,9 +8843,6 @@ find_most_lagged_child(struct lb_env *env) {
 		int num_busy;
 		unsigned int sum_nr_running;
 		struct rq *rq;
-#ifdef CONFIG_GVTS_AMP
-		int min_cpu_type = INT_MAX;
-#endif
 
 		local_group = cpumask_test_cpu(env->dst_cpu,
 							sd_vruntime_span(child));
@@ -9005,10 +8861,6 @@ find_most_lagged_child(struct lb_env *env) {
 			lagged_sum += lagged;
 			num_busy++;
 			sum_nr_running += rq->cfs.h_nr_running;
-#ifdef CONFIG_GVTS_AMP
-			if (rq->cpu_type < min_cpu_type)
-				min_cpu_type = rq->cpu_type;
-#endif
 		}
 
 		if (local_group) {
@@ -9016,15 +8868,8 @@ find_most_lagged_child(struct lb_env *env) {
 			this_busy = num_busy;
 			continue;
 		}
-// TODO: include cpu_type < dst_rq->cpu_type => ignore sum_nr_running condition
-#ifdef CONFIG_GVTS_AMP
-		if (min_cpu_type >= env->dst_rq->cpu_type 
-				&& sum_nr_running < child->nr_cpus)
-			continue;
-#else /* !CONFIG_GVTS_AMP */
 		if (sum_nr_running < child->nr_cpus)
 			continue;
-#endif /* !CONFIG_GVTS_AMP */
 
 #if CONFIG_GVTS_TOLERANCE_PERCENT > 0
 		/* Note that 1) tolerance = 0 for idle destination cpus
@@ -9078,17 +8923,10 @@ static struct rq *find_most_lagged_rq(struct lb_env *env,
 	for_each_cpu_and(cpu, sd_vruntime_span(sdv), env->cpus) {
 		gvts_stat_inc(env->sd, lagged_count[env->idle]);
 		rq = cpu_rq(cpu);
-#ifdef CONFIG_GVTS_AMP
-		if (rq->cpu_type >= env->dst_rq->cpu_type && rq->nr_running < 2) {
-			gvts_stat_inc(env->sd, lagged_little_tasks[env->idle]);
-			continue;
-		}
-#else /* !CONFIG_GVTS_AMP */
 		if (rq->nr_running < 2) {
 			gvts_stat_inc(env->sd, lagged_little_tasks[env->idle]);
 			continue;
 		}
-#endif /* !CONFIG_GVTS_AMP */
 
 		if (rq->cfs.h_nr_running == 0) {
 			gvts_stat_inc(env->sd, lagged_no_cfs_tasks[env->idle]);
@@ -9177,229 +9015,6 @@ int can_migrate_lagged_task(struct task_struct *p, struct lb_env *env)
 	return 1;
 }
 
-#ifdef CONFIG_GVTS_AMP
-static inline 
-s64 __migration_benefit(s64 src_lagged, s64 dst_lagged, s64 prev_max, u64 target,
-							int src_type, int dst_type, struct sched_entity *se)
-{
-	dst_lagged += task_lagged_type(se, target, dst_type);
-	if (dst_lagged > prev_max)
-		return -1;
-	src_lagged -= task_lagged_type(se, target, src_type);
-	if (src_lagged > prev_max)
-		return -1;
-	if (dst_lagged > src_lagged)
-		return prev_max - dst_lagged;
-	else
-		return prev_max - src_lagged;
-}
-
-static inline
-s64 migration_benefit(struct task_struct *p, struct lb_env *env)
-{
-	s64 src_lagged, dst_lagged, target;
-	target = env->target + env->interval;
-	src_lagged = rq_lagged(env->src_rq, target);
-	dst_lagged = rq_lagged(env->dst_rq, target);
-
-	return __migration_benefit(src_lagged, dst_lagged,
-				src_lagged > dst_lagged ? src_lagged : dst_lagged, target,
-				env->src_rq->cpu_type, env->dst_rq->cpu_type, &p->se);
-}
-
-static struct task_struct *pick_lowest_vruntime_task(struct rq *rq) {
-	struct sched_entity *se;
-	struct cfs_rq *cfs_rq = &rq->cfs;
-
-	if (!cfs_rq->nr_running)
-		return NULL;
-
-	do {
-		se = __pick_first_entity(cfs_rq);
-		/* consider about cfs_rq->curr
-		 * 1) if this function was called from detach_one_lagged_task(),
-		 *    current task is migration/? in stop class
-		 *    Thus, no cfs_rq has curr.
-		 * 2) if this function was called from detach_lagged_tasks(),
-		 *    cfs_rq has curr at some level.
-		 *    But, if it is a task, it will be filtered by can_migrate_lagged_task().
-		 */
-		if (cfs_rq->curr && !entity_is_task(cfs_rq->curr)
-				&& (!se || entity_before(cfs_rq->curr, se)))
-			se = cfs_rq->curr;
-
-		if (!se)
-			return NULL;
-
-		cfs_rq = group_cfs_rq(se);
-	} while (cfs_rq);
-
-	return task_of(se);
-}
-
-static struct task_struct *detach_one_lagged_task(struct lb_env *env)
-{
-	struct task_struct *p, *n;
-	int consider = 0, src_type, dst_type;
-	s64 src_lagged, dst_lagged, prev_max, target;
-	
-	target = env->target;
-	src_lagged = rq_lagged(env->src_rq, target);
-	dst_lagged = rq_lagged(env->dst_rq, target);
-	prev_max = src_lagged > dst_lagged ? src_lagged : dst_lagged;
-	src_type = env->src_rq->cpu_type;
-	dst_type = env->dst_rq->cpu_type;
-
-	lockdep_assert_held(&env->src_rq->lock);
-	
-	/* Firstly consider the leftmost entity in the red-black tree */
-	p = pick_lowest_vruntime_task(env->src_rq);
-	if (p && can_migrate_lagged_task(p, env)
-			&& __migration_benefit(src_lagged, dst_lagged, prev_max,
-									target, src_type, dst_type, &p->se) > 0) {
-		detach_task(p, env);
-		gvts_stat_inc(env->sd, atb_pushed_under);
-		return p;
-	}
-
-	list_for_each_entry_safe(p, n, &env->src_rq->cfs_tasks, se.group_node) {
-		if (!can_migrate_lagged_task(p, env))
-			continue;
-		
-		consider++;
-		if (unlikely(consider > sysctl_sched_nr_migrate))
-			break;
-
-		if (__migration_benefit(src_lagged, dst_lagged, prev_max, 
-								target,	src_type, dst_type, &p->se) <= 0)
-			continue;
-		
-		detach_task(p, env);
-		gvts_stat_inc(env->sd, atb_pushed);
-		return p;
-	}
-		gvts_stat_inc(env->sd, atb_failed);
-
-	return NULL;
-}
-
-static int detach_lagged_tasks(struct lb_env *env)
-{
-	struct list_head *tasks = &env->src_rq->cfs_tasks;
-	struct task_struct *p;
-	int detached = 0;
-	u64 target;
-	s64 dst_lagged, src_lagged;
-	s64 max_lagged, benefit;
-	int src_type = env->src_rq->cpu_type;
-	int dst_type = env->dst_rq->cpu_type;
-
-	lockdep_assert_held(&env->src_rq->lock);
-
-	gvts_stat_inc(env->sd, detach_count[env->idle]);
-
-	target = env->target + env->interval;
-	if (env->idle == CPU_NOT_IDLE) {
-		dst_lagged = rq_lagged(env->dst_rq, target);
-		src_lagged = rq_lagged(env->src_rq, target);
-		/* source is faster than destination */
-		if (unlikely(dst_lagged >= src_lagged)) {
-			gvts_stat_inc(env->sd, detach_neg_diff[env->idle]);
-			return 0;
-		}
-		max_lagged = dst_lagged;
-	} else{ /* idle or newly idle */
-		src_lagged = rq_lagged(env->src_rq, target);
-		dst_lagged = 0;
-		max_lagged = src_lagged >= 0 ? src_lagged : 0;
-	}
-
-	/* Firstly consider the leftmost entity in the red-black tree */
-	p = pick_lowest_vruntime_task(env->src_rq);
-	if (p) {
-		env->loop++;
-		goto consider_a_task;
-	}
-
-	while (!list_empty(tasks)) {
-		/* TODO: we do not consider ASYM_PACKING */
-		
-		if (env->src_rq->nr_running <= 1 
-#ifdef CONFIG_GVTS_AMP
-				&& !env->slower_src
-#endif
-			) {
-			gvts_stat_inc(env->sd, detach_loop_stop[env->idle]);
-			break;
-		}
-
-		p = list_first_entry(tasks, struct task_struct, se.group_node);
-		
-		env->loop++;
-		if (env->loop > env->loop_max) {
-			gvts_stat_inc(env->sd, detach_loop_stop[env->idle]);
-			break;
-		}
-
-		if (env->loop > env->loop_break) {
-			env->loop_break += sched_nr_migrate_break;
-			env->flags |= LBF_NEED_BREAK;
-			gvts_stat_inc(env->sd, detach_loop_stop[env->idle]);
-			break;
-		}
-
-		
-consider_a_task:
-		gvts_stat_inc(env->sd, detach_task_count[env->idle]);
-		if (!can_migrate_lagged_task(p, env)) {
-			gvts_stat_inc(env->sd, detach_task_cannot[env->idle]);
-			goto next;
-		}
-
-		benefit = __migration_benefit(src_lagged, dst_lagged, max_lagged, 
-									target,	src_type, dst_type, &p->se);
-		if (benefit <= 0) {
-			gvts_stat_inc(env->sd, detach_task_not_lag[env->idle]);
-			goto next;
-		}
-
-		gvts_stat_inc(env->sd, detach_task_detach[env->idle]);
-		detach_task(p, env);
-		list_add(&p->se.group_node, &env->tasks);
-
-		detached++;
-		/* note that lagged > 0 */
-		max_lagged -= benefit;
-		dst_lagged += task_lagged_type(&p->se, target, dst_type);
-		src_lagged -= task_lagged_type(&p->se, target, src_type);
-
-#ifdef CONFIG_PREEMPT
-		/*
-		 * NEWIDLE balancing is a source of latency, so preemptible
-		 * kernels will stop after the first task is detached to minimize
-		 * the critical section.
-		 */
-		if (env->idle == CPU_NEWLY_IDLE)
-			break;
-#endif
-
-		/* this may not be the optimal solution */
-		if (dst_lagged >= src_lagged) {
-			/* even if CPU_IDLE case, we got a task */
-			gvts_stat_inc(env->sd, detach_complete[env->idle]);
-			break;
-		}
-
-		continue;
-next:
-		list_move_tail(&p->se.group_node, tasks);
-	}
-
-	gvts_stat_add(env->sd, tb_gained[env->idle], detached);
-
-	return detached;
-}
-#else /* !CONFIG_GVTS_AMP - SMP version */
 static struct task_struct *detach_one_lagged_task(struct lb_env *env)
 {
 	struct task_struct *p, *n, *min_p = NULL;
@@ -9575,15 +9190,11 @@ next:
 
 	return detached;
 }
-#endif /* !CONFIG_GVTS_AMP - SMP version */
 
 static int find_dst_cpu(int __sd_level, int src_cpu) {
 	struct sched_domain *sd;
 	int sd_level = -(__sd_level + 1);
 	int cpu, dst_cpu = -1, dst_idle_cpu = -1;
-#ifdef CONFIG_GVTS_AMP
-	int dst_idle_type = -1;
-#endif
 	unsigned int min_exit_latency = UINT_MAX;
 	u64 latest_idle_timestamp = 0;
 	s64 lagged, min_lagged = LLONG_MAX;
@@ -9607,30 +9218,16 @@ static int find_dst_cpu(int __sd_level, int src_cpu) {
 			struct rq *rq = cpu_rq(cpu);
 			struct cpuidle_state *idle = idle_get_state(rq);
 
-#ifdef CONFIG_GVTS_AMP
-			if (rq->cpu_type < dst_idle_type)
-				/* when dst_idle_cpu < 0, dst_idle_type < 0.
-				 * Also, rq->cpu_type >= 0 always. */
-				continue;
-#endif
 
-			if (dst_idle_cpu < 0 
-#ifdef CONFIG_GVTS_AMP
-					|| rq->cpu_type > dst_idle_type
-#endif
-										) { /* first */
+			if (dst_idle_cpu < 0) { /* first */
 				if (idle)
 					min_exit_latency = idle->exit_latency;
 				latest_idle_timestamp = rq->idle_stamp;
 				dst_idle_cpu = cpu;
-#ifdef CONFIG_GVTS_AMP
-				dst_idle_type = rq->cpu_type;
-#endif
 			} else if (idle && idle->exit_latency < min_exit_latency) {
 				min_exit_latency = idle->exit_latency;
 				latest_idle_timestamp = rq->idle_stamp;
 				dst_idle_cpu = cpu;
-				/* dst_idle_type == rq->cpu_type */
 			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
 						rq->idle_stamp > latest_idle_timestamp) {
 				latest_idle_timestamp = rq->idle_stamp;
@@ -9804,16 +9401,9 @@ redo:
 
 	env.src_cpu = lagged_rq->cpu;
 	env.src_rq = lagged_rq;
-#ifdef CONFIG_GVTS_AMP
-	env.slower_src = env.src_rq->cpu_type < env.dst_rq->cpu_type;
-#endif
 
 	pulled_tasks = 0;
-	if (env.src_rq->nr_running > 1
-#ifdef CONFIG_GVTS_AMP
-			|| env.slower_src
-#endif
-		) {
+	if (env.src_rq->nr_running > 1) {
 		/* attempt to move lagged tasks. */
 		env.flags |= LBF_ALL_PINNED;
 		env.loop_max = min(sysctl_sched_nr_migrate, env.src_rq->nr_running);
@@ -9883,13 +9473,6 @@ redo:
 				env.flags |= LBF_ALL_PINNED;
 				goto unlock_one_pinned;
 			} 
-
-#ifdef CONFIG_GVTS_AMP
-			if (migration_benefit(env.src_rq->curr, &env) < 0) {
-				env.flags |= LBF_ALL_PINNED;
-				goto unlock_one_pinned;
-			};
-#endif /* CONFIG_GVTS_AMP */
 		}
 
 		/*
@@ -10331,10 +9914,6 @@ static inline int on_null_domain(struct rq *rq)
  */
 static struct {
 	cpumask_var_t idle_cpus_mask;
-#ifdef CONFIG_GVTS_AMP
-	cpumask_var_t idle_cpus_mask_type[NUM_CPU_TYPES];
-	atomic_t nr_cpus_acc[NUM_CPU_TYPES];
-#endif
 	atomic_t nr_cpus;
 	unsigned long next_balance;     /* in jiffy units */
 } nohz ____cacheline_aligned;
@@ -10379,21 +9958,12 @@ static void nohz_balancer_kick(void)
 
 static inline void nohz_balance_exit_idle(int cpu)
 {
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
 	if (unlikely(test_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu)))) {
 		/*
 		 * Completely isolated CPUs don't ever set, so we must test.
 		 */
 		if (likely(cpumask_test_cpu(cpu, nohz.idle_cpus_mask))) {
 			cpumask_clear_cpu(cpu, nohz.idle_cpus_mask);
-#ifdef CONFIG_GVTS_AMP
-		type = cpu_rq(cpu)->cpu_type;
-		cpumask_clear_cpu(cpu, nohz.idle_cpus_mask_type[type]);
-		for (; type >= 0; type--)
-			atomic_dec(&nohz.nr_cpus_acc[type]);
-#endif /* CONFIG_GVTS_AMP */
 			atomic_dec(&nohz.nr_cpus);
 		}
 		clear_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
@@ -10440,9 +10010,6 @@ unlock:
  */
 void nohz_balance_enter_idle(int cpu)
 {
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
 	/*
 	 * If this cpu is going down, then nothing needs to be done.
 	 */
@@ -10459,12 +10026,6 @@ void nohz_balance_enter_idle(int cpu)
 		return;
 
 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
-#ifdef CONFIG_GVTS_AMP
-	type = cpu_rq(cpu)->cpu_type;
-	cpumask_set_cpu(cpu, nohz.idle_cpus_mask_type[type]);
-	for (; type >= 0; type--)
-		atomic_inc(&nohz.nr_cpus_acc[type]);
-#endif /* CONFIG_GVTS_AMP */
 	atomic_inc(&nohz.nr_cpus);
 	set_bit(NOHZ_TICK_STOPPED, nohz_flags(cpu));
 }
@@ -10619,26 +10180,12 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 	/* Earliest time when we have to do rebalance again */
 	unsigned long next_balance = jiffies + 60*HZ;
 	int update_next_balance = 0;
-#ifdef CONFIG_GVTS_AMP
-	int type;
-#endif
 
 	if (idle != CPU_IDLE ||
 	    !test_bit(NOHZ_BALANCE_KICK, nohz_flags(this_cpu)))
 		goto end;
 
-#ifdef CONFIG_GVTS_AMP
-	type = NUM_CPU_TYPES - 1;
-	balance_cpu = -1;
-	while (type >= 0) {
-		balance_cpu = cpumask_next(balance_cpu, nohz.idle_cpus_mask_type[type]);
-		if (balance_cpu >= nr_cpu_ids) {
-			type--;
-			continue;
-		}
-#else
 	for_each_cpu(balance_cpu, nohz.idle_cpus_mask) {
-#endif
 		if (balance_cpu == this_cpu || !idle_cpu(balance_cpu))
 			continue;
 
@@ -10672,11 +10219,7 @@ static void nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 			next_balance = rq->next_balance;
 			update_next_balance = 1;
 		}
-#ifdef CONFIG_GVTS_AMP
-	} /* for vim...*/
-#else
 	}
-#endif
 
 	/*
 	 * next_balance will be updated only when there is a need.
@@ -10730,13 +10273,6 @@ static inline bool nohz_kick_needed(struct rq *rq)
 
 	if (rq->nr_running >= 2)
 		return true;
-
-#ifdef CONFIG_GVTS_AMP
-	if (rq->cpu_type + 1 < NUM_CPU_TYPES
-			&& rq->cfs.h_nr_running >= 1 
-			&& atomic_read(&nohz.nr_cpus_acc[rq->cpu_type + 1]) > 0)
-		return true;
-#endif
 
 	rcu_read_lock();
 	sd = rcu_dereference(per_cpu(sd_busy, cpu));
@@ -11071,9 +10607,6 @@ static void set_curr_task_fair(struct rq *rq)
 		/* ensure bandwidth has been allocated on our new cfs_rq */
 		account_cfs_rq_runtime(cfs_rq, 0);
 	}
-#ifdef CONFIG_GVTS_AMP
-	set_curr_effi(rq->curr);
-#endif
 }
 
 void init_cfs_rq(struct cfs_rq *cfs_rq)
@@ -11398,20 +10931,12 @@ void show_numa_stats(struct task_struct *p, struct seq_file *m)
 
 __init void init_sched_fair_class(void)
 {
-#if defined(CONFIG_GVTS_AMP) && defined(CONFIG_NO_HZ_COMMON)
-	int type;
-#endif
 #ifdef CONFIG_SMP
 	open_softirq(SCHED_SOFTIRQ, run_rebalance_domains);
 
 #ifdef CONFIG_NO_HZ_COMMON
 	nohz.next_balance = jiffies;
 	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
-#ifdef CONFIG_GVTS_AMP
-	for_each_type(type) {
-		zalloc_cpumask_var(&nohz.idle_cpus_mask_type[type], GFP_NOWAIT);
-	}
-#endif
 	cpu_notifier(sched_ilb_notifier, 0);
 #endif
 #endif /* SMP */

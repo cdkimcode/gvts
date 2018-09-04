@@ -855,37 +855,6 @@ config GVTS_DEBUG_NORMALIZATION
 	help
 		Debug information for virtual time normalization when a task is waking up
 
-config GVTS_AMP
-	bool "AMP support of GVTS"
-	default y
-	depends on GVTS
-	help
-		GVTS for AMP.
-		efficiency (and efficiency modes) for tasks.
-		define cpu types for each rq.
-		minimize max(lagged_src, lagged_dst) at targer vruntime balancing.
-		Try to balance even if only 1 task at source runqueue when source is slower than destination.
-		faster-core-first for NOHZ of GVTS_AMP
-
-config GVTS_NUM_CPU_TYPES
-	int "Number of CPU types"
-	range 1 16
-	default 2
-	depends on GVTS_AMP
-	help
-		The number of CPU types supported by GVTS.
-
-config GVTS_BASE_CPU_TYPE
-	int "CPU type id for the base performance"
-	range -1 15
-	depends on GVTS_AMP
-	default -1
-	help
-		The CPU type id used to define the base performance.
-		This value should be smaller than GVTS_NUM_CPU_TYPES
-		If this says -1, FAIR_SHARE is used.
-		FAIR_SHARE = SUM(num_type_i_cpus * efficiency[i]) / SUM(num_type_i_cpus)
-
 config GVTS_STATS
 	bool "Schedstats for GVTS"
 	default y
